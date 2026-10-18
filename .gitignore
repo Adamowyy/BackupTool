@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.buildenv/
+build/
+dist/
+_out_test/
+*.part
+error.log
+.hermes/
