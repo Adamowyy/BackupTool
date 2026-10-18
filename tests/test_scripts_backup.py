@@ -10,6 +10,7 @@ class ScriptsIncludedTest(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
         os.makedirs(os.path.join(self.root, "scripts", "__pycache__"))
+        os.makedirs(os.path.join(self.root, "assets", "icons"))
         open(os.path.join(self.root, "config.yaml"), "w").close()
         open(os.path.join(self.root, "scripts", "watchdog.py"), "w").close()
         open(os.path.join(self.root, "scripts", "__pycache__", "x.pyc"), "w").close()
@@ -19,6 +20,7 @@ class ScriptsIncludedTest(unittest.TestCase):
                                             "builtin")
         include = specs[0]["include"]
         self.assertIn("scripts", include)
+        self.assertIn("assets", include)
         self.assertIn("__pycache__", specs[0]["skip_names"])
 
     def test_scripts_absent_from_include_when_missing(self):

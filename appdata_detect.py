@@ -16,6 +16,7 @@ HERMES_INCLUDE = (
     "SOUL.md",
     "skills",
     "scripts",
+    "assets",
     "plugins",
     "desktop-plugins",
     "hooks",
