@@ -697,10 +697,7 @@ class BackupDialog(ctk.CTkToplevel):
                     corner_radius=9, font=("Segoe UI", 12, "bold")).pack(
             side="right", padx=(0, 8))
 
-        self.src_list = ctk.CTkScrollableFrame(body, fg_color=CARD, corner_radius=10,
-                                               height=64,
-                                               scrollbar_button_color=BORDER,
-                                               scrollbar_button_hover_color=SUBTLE)
+        self.src_list = ctk.CTkFrame(body, fg_color=CARD, corner_radius=10)
         self.src_list.pack(fill="x", padx=6)
 
         self._build_appdata()
@@ -1117,6 +1114,9 @@ class BackupDialog(ctk.CTkToplevel):
                         width=28, height=28, fg_color="transparent",
                         hover_color=DANGER_SOFT, text_color=MUTED,
                         corner_radius=6, font=F_SMALL).pack(side="right", padx=(4, 6))
+
+        self.src_list.update_idletasks()
+        self._fit()
 
     def _set_provider(self, provider):
         if provider == "none":
