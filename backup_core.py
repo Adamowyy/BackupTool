@@ -89,17 +89,58 @@ def zip_available_for(backup: dict) -> bool:
     return zip_available(backup.get("sources") or [])
 
 def normalize_cloud(raw) -> dict:
-    """Wybór miejsca docelowego: lokalnie albo chmura (dropbox / gdrive)."""
-    data = {"provider": "none", "path": ""}
-    if isinstance(raw, dict):
-        provider = str(raw.get("provider") or "none").lower()
-        if provider in ("", "local", None):
-            provider = "none"
-        if provider not in CLOUD_PROVIDERS:
-            provider = "none"
-        data["provider"] = provider
-        data["path"] = str(raw.get("path") or "")
+    """Cel zapisu plus folder zapamiętany osobno dla każdej chmury.
+
+    Przełączanie Lokalnie / Dropbox / Google Drive nie kasuje wpisanych folderów,
+    więc powrót do chmury odtwarza to, co było tam ustawione.
+    """
+    data = {"provider": "none", "path": "", "paths": {}}
+    if not isinstance(raw, dict):
+        return data
+
+    provider = str(raw.get("provider") or "none").lower()
+    if provider in ("", "local"):
+        provider = "none"
+    if provider not in CLOUD_PROVIDERS:
+        provider = "none"
+
+    paths = {}
+    stored = raw.get("paths")
+    if isinstance(stored, dict):
+        for name, value in stored.items():
+            key = str(name).lower()
+            if key in CLOUD_PROVIDERS and key != "none" and isinstance(value, str):
+                paths[key] = value.strip(" /\\")
+
+    path = str(raw.get("path") or "").strip(" /\\")
+    if provider != "none" and ("path" in raw or provider not in paths):
+        # Jawne „path” wygrywa, więc wyczyszczone pole nie odrasta ze starej wartości.
+        paths[provider] = path
+
+    data["provider"] = provider
+    data["path"] = paths.get(provider, "") if provider != "none" else ""
+    data["paths"] = paths
     return data
+
+def cloud_path_for(backup: dict, provider: str) -> str:
+    """Folder zapamiętany dla wskazanej chmury (nawet gdy aktywna jest inna)."""
+    return normalize_cloud(backup.get("cloud"))["paths"].get(provider, "")
+
+def switch_cloud(raw, provider: str) -> dict:
+    """Zmiana trybu (Lokalnie / Dropbox / Google Drive) z pamięcią folderów.
+
+    Bieżący folder trafia do mapy pod swoją chmurę, a nowa chmura dostaje ten,
+    który miała zapisany wcześniej, więc przełączanie niczego nie kasuje.
+    """
+    data = normalize_cloud(raw)
+    if provider not in CLOUD_PROVIDERS:
+        provider = "none"
+    if data["provider"] != "none":
+        data["paths"][data["provider"]] = data["path"]
+    data["provider"] = provider
+    data["path"] = data["paths"].get(provider, "") if provider != "none" else ""
+    return data
+
 
 def cloud_provider(backup: dict) -> str:
     return normalize_cloud(backup.get("cloud"))["provider"]

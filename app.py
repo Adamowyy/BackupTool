@@ -1380,11 +1380,14 @@ class BackupDialog(ctk.CTkToplevel):
     def _set_provider(self, provider):
         if provider == "none":
             self._zip_pref = self._zip_pref_local
-        self._provider = provider
-        data = core.normalize_cloud(self.backup.get("cloud"))
-        data["provider"] = provider
+        live = dict(self.backup.get("cloud") or {})
+        if self._provider != "none":
+            live["path"] = self.entry_remote.get().strip()
+        data = core.switch_cloud(live, provider)
+        self._provider = data["provider"]
         self.backup["cloud"] = data
-        if provider != "none" and not self.entry_remote.get().strip() and data["path"]:
+        if self._provider != "none":
+            self.entry_remote.delete(0, "end")
             self.entry_remote.insert(0, data["path"])
         self._sync_zip()
         self._sync_cloud()
@@ -1574,10 +1577,10 @@ class BackupDialog(ctk.CTkToplevel):
         draft["destination"] = self.entry_dest.get().strip()
         draft["sources"] = list(self.backup["sources"])
         draft["app_data"] = core.normalize_app_data(self.backup["app_data"])
-        draft["cloud"] = {
-            "provider": self._provider,
-            "path": self.entry_remote.get().strip() if self._provider != "none" else "",
-        }
+        live = dict(self.backup.get("cloud") or {})
+        if self._provider != "none":
+            live["path"] = self.entry_remote.get().strip()
+        draft["cloud"] = core.switch_cloud(live, self._provider)
         draft["use_zip"] = core.use_zip_for(draft)
         return draft
 

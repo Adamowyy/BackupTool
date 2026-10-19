@@ -26,7 +26,7 @@ def write(path, content="x"):
 class CloudModelTests(unittest.TestCase):
     def test_default_is_local(self):
         self.assertEqual(core.normalize_cloud(None),
-                         {"provider": "none", "path": ""})
+                         {"provider": "none", "path": "", "paths": {}})
         self.assertEqual(core.cloud_provider({}), "none")
 
     def test_known_providers(self):
@@ -214,6 +214,83 @@ class RcloneConfigTests(unittest.TestCase):
 
     def test_garbage_authorize_output_returns_none(self):
         self.assertIsNone(cloud._extract_token("Paste the following into your remote machine --->\n<---End paste"))
+
+
+class CloudFolderMemoryTests(unittest.TestCase):
+    """Każda chmura pamięta swój folder, także po powrocie z trybu lokalnego."""
+
+    def _cloud(self, provider, path, paths=None):
+        raw = {"provider": provider, "path": path}
+        if paths is not None:
+            raw["paths"] = paths
+        return core.normalize_cloud(raw)
+
+    def test_old_state_without_map_seeds_the_active_provider(self):
+        data = self._cloud("gdrive", "Backups/Gry")
+        self.assertEqual(data["paths"], {"gdrive": "Backups/Gry"})
+
+    def test_switching_keeps_the_other_clouds_folder(self):
+        first = self._cloud("gdrive", "Backups/Gry")
+        switched = core.switch_cloud(first, "dropbox")
+        self.assertEqual(switched["path"], "")
+        saved = core.switch_cloud(dict(switched, path="Kopie"), "dropbox")
+        self.assertEqual(saved["paths"], {"gdrive": "Backups/Gry", "dropbox": "Kopie"})
+        back = core.switch_cloud(saved, "gdrive")
+        self.assertEqual(back["path"], "Backups/Gry")
+        self.assertEqual(back["paths"]["dropbox"], "Kopie")
+
+    def test_local_mode_then_back_restores_the_folder(self):
+        cloud = self._cloud("gdrive", "Backups/Gry")
+        local = core.switch_cloud(cloud, "none")
+        self.assertEqual(local["provider"], "none")
+        self.assertEqual(local["path"], "")
+        self.assertEqual(local["paths"], {"gdrive": "Backups/Gry"})
+        again = core.switch_cloud(local, "gdrive")
+        self.assertEqual(again["path"], "Backups/Gry")
+
+    def test_local_mode_keeps_both_folders(self):
+        local = core.normalize_cloud({"provider": "none", "path": "",
+                                      "paths": {"gdrive": "Backups/Gry",
+                                                "dropbox": "Kopie"}})
+        self.assertEqual(local["provider"], "none")
+        self.assertEqual(local["path"], "")
+        self.assertEqual(local["paths"]["gdrive"], "Backups/Gry")
+        self.assertEqual(local["paths"]["dropbox"], "Kopie")
+
+    def test_cleared_folder_does_not_grow_back(self):
+        cleared = self._cloud("gdrive", "", {"gdrive": "Backups/Gry"})
+        self.assertEqual(cleared["path"], "")
+        self.assertEqual(cleared["paths"]["gdrive"], "")
+
+    def test_paths_are_trimmed_of_separators(self):
+        data = self._cloud("dropbox", "/Kopie/BackupTool/")
+        self.assertEqual(data["path"], "Kopie/BackupTool")
+
+    def test_unknown_keys_in_the_map_are_dropped(self):
+        data = self._cloud("gdrive", "A", {"gdrive": "A", "onedrive": "X", "none": "Y"})
+        self.assertEqual(data["paths"], {"gdrive": "A"})
+
+    def test_helper_reads_the_other_clouds_folder(self):
+        backup = core.new_backup("Kopia", [], "", True,
+                                 cloud_settings={"provider": "gdrive",
+                                                 "path": "Backups/Gry"})
+        self.assertEqual(core.cloud_path_for(backup, "gdrive"), "Backups/Gry")
+        self.assertEqual(core.cloud_path_for(backup, "dropbox"), "")
+
+    def test_state_file_keeps_both_folders(self):
+        folder = tempfile.mkdtemp(prefix="bt-paths-")
+        path = os.path.join(folder, "backups.json")
+        backup = core.new_backup("Kopia", [], "", True,
+                                 cloud_settings={"provider": "dropbox", "path": "Kopie",
+                                                 "paths": {"gdrive": "Backups/Gry",
+                                                           "dropbox": "Kopie"}})
+        state = core.default_state()
+        core.put_backup(state, backup)
+        core.save_state(state, path)
+        again = core.load_state(path)
+        cloud = core.normalize_cloud(again["backups"][0]["cloud"])
+        self.assertEqual(cloud["paths"], {"gdrive": "Backups/Gry", "dropbox": "Kopie"})
+        self.assertEqual(core.cloud_remote_dir(again["backups"][0]), "Kopie")
 
 
 class CloudDownloadTests(unittest.TestCase):

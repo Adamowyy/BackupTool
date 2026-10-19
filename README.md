@@ -35,6 +35,8 @@ Windows may show an "unknown publisher" warning — click **More info** → **Ru
 
 - Folder mode overwrites existing files and adds new ones, but never deletes anything.
 - ZIP mode builds the archive from scratch, so it always matches the source.
+- Switching between Local, Dropbox and Google Drive keeps the cloud folder you set for
+  each of them, so going back to a cloud restores the same path.
 - SQLite databases are copied through a snapshot, so the copy stays consistent even
   while the source app is running.
 - Cloud uploads always use a single ZIP file — uploading thousands of separate files
