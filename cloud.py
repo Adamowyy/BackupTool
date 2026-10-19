@@ -124,6 +124,22 @@ def _silent_remove(path: str) -> None:
     except OSError:
         pass
 
+def _remove_partials(local_file: str) -> None:
+    """rclone pisze `<nazwa>.<hash>.partial`; po ubitym procesie zostaje taki trup.
+
+    Bez tego każde przerwane pobranie zostawia na dysku plik wielkości tego, co
+    zdążyło zlecieć, a użytkownik myśli, że kopia jest kompletna.
+    """
+    folder = os.path.dirname(local_file) or "."
+    prefix = os.path.basename(local_file) + "."
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return
+    for name in names:
+        if name.startswith(prefix) and name.endswith(".partial"):
+            _silent_remove(os.path.join(folder, name))
+
 def rclone_version(exe: str | None = None) -> str:
     exe = exe or rclone_exe()
     if not exe:
@@ -316,6 +332,78 @@ def _first_error(result) -> str:
             return line[:300]
     return i18n.t("Unknown rclone error")
 
+def _remote_ref(provider: str, remote_dir: str, filename: str) -> str:
+    """Pełna referencja rclone do jednego pliku w chmurze (`dropbox:Backups/x.zip`)."""
+    name = REMOTE_NAMES.get(provider, "")
+    folder = (remote_dir or "").replace("\\", "/").strip("/ ")
+    return f"{name}:{folder}/{filename}" if folder else f"{name}:{filename}"
+
+def remote_file(provider: str, remote_dir: str, filename: str,
+                timeout: int = 120) -> dict | None:
+    """Czy kopia jest w chmurze? Zwraca {name, size, modified} albo None.
+
+    Jeden `rclone lsjson --stat` (ok. 2 s na Google Drive) — nie pobiera nic,
+    więc nadaje się na sprawdzenie tuż przed kliknięciem „Pobierz”.
+    """
+    exe = rclone_exe()
+    if not exe:
+        raise CloudError(i18n.t("Rclone is not installed."))
+    if not REMOTE_NAMES.get(provider):
+        raise CloudError(i18n.t("Unknown provider: {provider}", provider=provider))
+    if not remote_ready(provider):
+        raise CloudError(i18n.t("Account disconnected — connect it again."))
+
+    ref = _remote_ref(provider, remote_dir, filename)
+    try:
+        result = subprocess.run([exe, "lsjson", ref, "--stat"], capture_output=True,
+                                text=True, timeout=timeout, encoding="utf-8",
+                                errors="replace", env=_env(), **_hidden_kwargs())
+    except subprocess.TimeoutExpired as exc:
+        raise CloudError(i18n.t("The cloud did not answer in time.")) from exc
+    except OSError as exc:
+        raise CloudError(i18n.t("Could not start rclone: {error}", error=exc)) from exc
+
+    if result.returncode != 0:
+        message = _first_error(result)
+        lowered = message.lower()
+        if "not found" in lowered or "doesn't exist" in lowered or "not exist" in lowered:
+            return None
+        if "invalid_grant" in message or "invalid token" in lowered:
+            raise CloudError(i18n.t("Account disconnected — connect it again."))
+        raise CloudError(i18n.t("Cloud check failed: {message}", message=message))
+
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except ValueError:
+        return None
+    if not isinstance(payload, dict) or payload.get("IsDir"):
+        return None
+    return {"name": payload.get("Name") or filename,
+            "size": int(payload.get("Size") or 0),
+            "modified": payload.get("ModTime") or ""}
+
+def download_file(local_file: str, provider: str, remote_dir: str, filename: str,
+                  on_percent=None, should_stop=None) -> None:
+    """Pobiera jedną kopię z chmury na dysk (rclone `copyto`)."""
+    exe = rclone_exe()
+    if not exe:
+        raise CloudError(i18n.t("Rclone is not installed."))
+    if not REMOTE_NAMES.get(provider):
+        raise CloudError(i18n.t("Unknown provider: {provider}", provider=provider))
+    ref = _remote_ref(provider, remote_dir, filename)
+    folder = os.path.dirname(local_file)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+    try:
+        _run_rclone([exe, "copyto", ref, local_file, "--transfers", "1"], on_percent,
+                    should_stop, action="download")
+    except CloudError:
+        _remove_partials(local_file)
+        raise
+    _remove_partials(local_file)
+    if not os.path.isfile(local_file):
+        raise CloudError(i18n.t("The download finished but the file is missing."))
+
 def upload_file(local_file: str, provider: str, remote_dir: str,
                 on_status=None, on_percent=None, should_stop=None) -> None:
     """Wysyła pojedynczy plik (ZIP) do chmury, raportując procent."""
@@ -349,7 +437,8 @@ def upload_dir(local_dir: str, provider: str, remote_dir: str,
 _PERCENT = re.compile(r"(\d{1,3})%")
 _STATS = ("--stats", "1s", "--log-level", "INFO", "--use-json-log")
 
-def _run_rclone(args: list, on_percent=None, should_stop=None) -> None:
+def _run_rclone(args: list, on_percent=None, should_stop=None,
+                action: str = "upload") -> None:
     command = list(args) + list(_STATS) + ["--config", conf_path()]
     try:
         process = subprocess.Popen(
@@ -372,7 +461,9 @@ def _run_rclone(args: list, on_percent=None, should_stop=None) -> None:
                 pass
             with _ACTIVE_LOCK:
                 _ACTIVE_PIDS.discard(process.pid)
-            raise CloudError(i18n.t("Upload cancelled — the copy stays local only."))
+            raise CloudError(i18n.t("Upload cancelled — the copy stays local only.")
+                             if action == "upload"
+                             else i18n.t("Download cancelled."))
         if line:
             tail.append(line)
             if len(tail) > 40:
@@ -386,7 +477,9 @@ def _run_rclone(args: list, on_percent=None, should_stop=None) -> None:
         code = process.wait(timeout=1800)
     except subprocess.TimeoutExpired as exc:
         process.kill()
-        raise CloudError(i18n.t("Upload took too long and was aborted.")) from exc
+        raise CloudError(i18n.t("Upload took too long and was aborted.")
+                         if action == "upload"
+                         else i18n.t("The download took too long and was aborted.")) from exc
     finally:
         with _ACTIVE_LOCK:
             _ACTIVE_PIDS.discard(process.pid)
@@ -397,7 +490,10 @@ def _run_rclone(args: list, on_percent=None, should_stop=None) -> None:
             raise CloudError(i18n.t("Account disconnected — connect it again."))
         if "invalid_client" in message:
             raise CloudError(i18n.t("Wrong client ID / secret (see the Google guide)."))
-        raise CloudError(i18n.t("Cloud rejected the upload: {message}", message=message))
+        raise CloudError(i18n.t("Cloud rejected the upload: {message}", message=message)
+                         if action == "upload"
+                         else i18n.t("Cloud rejected the download: {message}",
+                                     message=message))
 
 def prepare_upload(backup: dict, local_target: str, on_status=None,
                    on_percent=None, should_stop=None) -> bool:

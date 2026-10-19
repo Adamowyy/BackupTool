@@ -225,6 +225,33 @@ PL = {
     "Wrong client ID / secret (see the Google guide).":
         "Błędny client ID / secret (sprawdź instrukcję Google).",
     "Cloud rejected the upload: {message}": "Chmura odrzuciła wysyłkę: {message}",
+    "Cloud rejected the download: {message}": "Chmura odrzuciła pobieranie: {message}",
+    "Cloud check failed: {message}": "Sprawdzenie chmury nie udało się: {message}",
+    "The cloud did not answer in time.": "Chmura nie odpowiedziała w porę.",
+    "Download cancelled.": "Przerwano pobieranie.",
+    "The download took too long and was aborted.":
+        "Pobieranie trwało zbyt długo i zostało przerwane.",
+    "The download finished but the file is missing.":
+        "Pobieranie się skończyło, ale pliku nie ma na dysku.",
+    "⇣  Download": "⇣  Pobierz",
+    "Checking the cloud…": "Sprawdzam chmurę…",
+    "Checking the cloud for “{name}”…": "Sprawdzam chmurę: „{name}”…",
+    "No copy in the cloud yet for “{name}” — run the backup with the cloud destination on.":
+        "W chmurze nie ma jeszcze kopii „{name}” — uruchom backup z celem w chmurze.",
+    "Save {filename} from the cloud ({size}) — pick a folder":
+        "Zapisz {filename} z chmury ({size}) — wybierz folder",
+    "Save {filename} from the cloud ({size}, {when}) — pick a folder":
+        "Zapisz {filename} z chmury ({size}, {when}) — wybierz folder",
+    "Downloading “{name}” from {provider}…": "Pobieram „{name}” z {provider}…",
+    "Downloaded “{name}”: {size} → {path}": "Pobrano „{name}”: {size} → {path}",
+    "Download failed: {message}": "Pobieranie nie udało się: {message}",
+    "Downloading…": "Pobieranie…",
+    "Stopping the download…": "Zatrzymuję pobieranie…",
+    "Download stopped — no file was saved.":
+        "Przerwano pobieranie — żaden plik nie został zapisany.",
+    "Finish the current run first.": "Najpierw dokończ trwające kopiowanie.",
+    "Finish the current download first.": "Najpierw dokończ trwające pobieranie.",
+    "A download is in progress. Close the app?": "Trwa pobieranie. Zamknąć aplikację?",
     "Unknown rclone error": "nieznany błąd rclone",
     "Uploading {name} to {provider}…": "Wysyłam {name} do {provider}…",
     "Downloading rclone (~32 MB)…": "Pobieranie rclone (~32 MB)…",

@@ -1,3 +1,4 @@
+import datetime
 import os
 import queue
 import sys
@@ -130,6 +131,8 @@ class BackupApp:
         self._batch_errors = 0
         self._cancel_flag = threading.Event()
         self._worker = None
+        self._downloading = None
+        self._download_cancel = threading.Event()
 
         self._build_ui()
         self._refresh_list()
@@ -317,20 +320,42 @@ class BackupApp:
         actions = ctk.CTkFrame(inner, fg_color="transparent")
         actions.pack(side="right", padx=(16, 0))
         running = backup["id"] == self._running_id
-        style = dict(fg_color=DANGER_SOFT, hover_color=DANGER_SOFT_HOVER,
-                     text_color=ERR_TEXT, border_width=0) if running else \
-            dict(fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=ON_ACCENT)
-        action = (lambda bid=backup["id"]: self._toggle_run(bid)) if running else \
-            (lambda bid=backup["id"]: self._start_run(bid))
-        btn_start = make_button(actions, i18n.t("Stop") if running else i18n.t("Start"),
-                                action, width=96, height=34, corner_radius=9,
-                                font=F_BUTTON, **style)
-        btn_start.pack(side="right")
+        downloading = backup["id"] == self._downloading
+        if downloading:
+            stop_style = dict(fg_color=DANGER_SOFT, hover_color=DANGER_SOFT_HOVER,
+                              text_color=ERR_TEXT, border_width=0)
+            btn_start = make_button(
+                actions, i18n.t("Stop"),
+                lambda bid=backup["id"]: self._toggle_download(bid),
+                width=96, height=34, corner_radius=9, font=F_BUTTON, **stop_style)
+            btn_start.pack(side="right")
+        else:
+            style = dict(fg_color=DANGER_SOFT, hover_color=DANGER_SOFT_HOVER,
+                         text_color=ERR_TEXT, border_width=0) if running else \
+                dict(fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=ON_ACCENT)
+            action = (lambda bid=backup["id"]: self._toggle_run(bid)) if running else \
+                (lambda bid=backup["id"]: self._start_run(bid))
+            btn_start = make_button(actions, i18n.t("Stop") if running else i18n.t("Start"),
+                                    action, width=96, height=34, corner_radius=9,
+                                    font=F_BUTTON, **style)
+            btn_start.pack(side="right")
         make_button(actions, i18n.t("Open settings"),
                     lambda bid=backup["id"]: self._edit_backup(bid),
                     width=112, height=34, fg_color="transparent", hover_color=CARD_SEL,
                     text_color=MUTED, border_width=1, border_color=BORDER,
                     corner_radius=9, font=F_SMALL).pack(side="right", padx=(0, 8))
+        # Pobieranie ma sens tylko dla celu w chmurze — lokalna kopia leży na dysku.
+        if core.cloud_provider(backup) != "none":
+            btn_down = make_button(actions, i18n.t("⇣  Download"),
+                                   lambda bid=backup["id"]: self._download_from_cloud(bid),
+                                   width=122, height=34, fg_color="transparent",
+                                   hover_color=CARD_SEL,
+                                   text_color=SUBTLE if downloading else INFO_TEXT,
+                                   border_width=1, border_color=BORDER, corner_radius=9,
+                                   font=F_SMALL)
+            btn_down.pack(side="right", padx=(0, 8))
+            if downloading:
+                btn_down.configure(state="disabled")
 
         info = ctk.CTkFrame(inner, fg_color="transparent")
         info.pack(side="left", fill="x", expand=True)
@@ -357,6 +382,8 @@ class BackupApp:
     def _badge_for(self, backup):
         if backup["id"] == self._running_id:
             return (i18n.t("Running…"), CARD_SEL, ACCENT)
+        if backup["id"] == self._downloading:
+            return (i18n.t("Downloading…"), CARD_SEL, INFO_TEXT)
         last = backup.get("last_run")
         if not last:
             return (i18n.t("New"), CARD_SEL, SUBTLE)
@@ -429,6 +456,9 @@ class BackupApp:
         if self._running_id or self._batch_queue:
             self._stop_batch()
             return
+        if self._downloading:
+            self._set_status(i18n.t("Finish the current download first."), WARN_TEXT)
+            return
         ids = [b["id"] for b in self.state.get("backups", [])]
         if not ids:
             return
@@ -459,6 +489,10 @@ class BackupApp:
 
     def _start_run(self, backup_id, from_batch=False):
         if self._running_id:
+            return
+        if self._downloading:
+            # Jeden pasek postępu i jedno rclone naraz — dokończ pobieranie.
+            self._set_status(i18n.t("Finish the current download first."), WARN_TEXT)
             return
         backup = core.get_backup(self.state, backup_id)
         if not backup:
@@ -512,6 +546,18 @@ class BackupApp:
                     self._show_progress(*payload)
                 elif kind == "done":
                     self._finish(*payload)
+                elif kind == "download_ready":
+                    self._download_ready(*payload)
+                elif kind == "download_missing":
+                    self._download_missing(*payload)
+                elif kind == "download_progress":
+                    self._download_progress(*payload)
+                elif kind == "download_done":
+                    self._download_finished(*payload)
+                elif kind == "download_cancelled":
+                    self._download_cancelled(*payload)
+                elif kind == "download_failed":
+                    self._download_failed(*payload)
         except queue.Empty:
             pass
         self.root.after(80, self._poll_queue)
@@ -601,6 +647,191 @@ class BackupApp:
                 return
             self._batch_next()
 
+    # ---- pobieranie kopii z chmury -------------------------------------
+    def _download_from_cloud(self, backup_id):
+        """Krok 1: sprawdź, czy kopia jest w chmurze (nic nie pobiera)."""
+        if self._running_id or self._downloading:
+            self._set_status(i18n.t("Finish the current run first."), WARN_TEXT)
+            return
+        backup = core.get_backup(self.state, backup_id)
+        if not backup or core.cloud_provider(backup) == "none":
+            return
+        provider = core.cloud_provider(backup)
+        filename = os.path.basename(core.target_path(backup))
+        name = backup.get("name") or filename
+        self._downloading = backup_id
+        self._download_cancel.clear()
+        self._refresh_list()
+        self._set_status(i18n.t("Checking the cloud for “{name}”…", name=name), MUTED)
+        self._show_download_progress(backup_id, 0, i18n.t("Checking the cloud…"))
+        threading.Thread(target=self._download_check_worker,
+                         args=(dict(backup), provider, filename), daemon=True).start()
+
+    def _download_check_worker(self, backup, provider, filename):
+        try:
+            info = cloud.remote_file(provider, core.cloud_remote_dir(backup), filename)
+        except Exception as exc:  # noqa: BLE001 - błąd chmury trafia do statusu
+            self._queue.put(("download_failed", (backup["id"], str(exc))))
+            return
+        if not info:
+            self._queue.put(("download_missing", (backup["id"], filename)))
+        else:
+            self._queue.put(("download_ready", (backup["id"], filename, info)))
+
+    def _toggle_download(self, backup_id):
+        """Przycisk Stop na karcie, w której trwa pobieranie."""
+        if self._downloading != backup_id:
+            return
+        self._download_cancel.set()
+        self._set_status(i18n.t("Stopping the download…"), WARN_TEXT)
+
+    def _download_missing(self, backup_id, filename):
+        self._downloading = None
+        self._download_cancel.clear()
+        self._hide_progress()
+        self._refresh_list()
+        backup = core.get_backup(self.state, backup_id) or {}
+        name = backup.get("name") or filename
+        self._set_status(i18n.t("No copy in the cloud yet for “{name}” — run the backup "
+                                "with the cloud destination on.", name=name), WARN_TEXT)
+
+    def _download_ready(self, backup_id, filename, info):
+        """Krok 2: kopia jest — pokaż jej rozmiar/datę i pozwól wybrać folder."""
+        backup = core.get_backup(self.state, backup_id)
+        if not backup:
+            self._downloading = None
+            self._hide_progress()
+            return
+        size = core.human_size(info.get("size") or 0)
+        when = self._cloud_when(info.get("modified"))
+        title = i18n.t("Save {filename} from the cloud ({size}) — pick a folder",
+                       filename=filename, size=size)
+        if when:
+            title = i18n.t("Save {filename} from the cloud ({size}, {when}) — pick a folder",
+                           filename=filename, size=size, when=when)
+        folder = filedialog.askdirectory(parent=self.root, title=title, mustexist=True)
+        self._hide_progress()
+        if not folder:
+            self._downloading = None
+            self._download_cancel.clear()
+            self._refresh_list()
+            self._set_status(i18n.t("Download cancelled."), WARN_TEXT)
+            return
+        target = self._free_download_path(folder, filename)
+        provider = core.cloud_provider(backup)
+        text = i18n.t("Downloading “{name}” from {provider}…", name=filename,
+                      provider=cloud.PROVIDER_LABELS.get(provider, provider))
+        self._set_status(text, MUTED)
+        self._show_download_progress(backup_id, 0, text)
+        threading.Thread(target=self._download_worker,
+                         args=(dict(backup), provider, filename, target, info),
+                         daemon=True).start()
+
+    def _download_worker(self, backup, provider, filename, target, info):
+        def percent(value):
+            self._queue.put(("download_progress", (backup["id"], value)))
+
+        try:
+            cloud.download_file(target, provider, core.cloud_remote_dir(backup),
+                                filename, on_percent=percent,
+                                should_stop=self._download_cancel.is_set)
+        except Exception as exc:  # noqa: BLE001 - komunikat z cloud.py jest gotowy
+            if self._download_cancel.is_set():
+                self._queue.put(("download_cancelled", (backup["id"], target)))
+            else:
+                self._queue.put(("download_failed", (backup["id"], str(exc))))
+            return
+        self._queue.put(("download_done",
+                         (backup["id"], target, info.get("size") or 0,
+                          backup.get("name") or filename)))
+
+    def _download_progress(self, backup_id, percent):
+        if self._downloading != backup_id:
+            return
+        backup = core.get_backup(self.state, backup_id) or {}
+        name = backup.get("name") or ""
+        provider = cloud.PROVIDER_LABELS.get(core.cloud_provider(backup), "")
+        text = i18n.t("Downloading “{name}” from {provider}…", name=name, provider=provider)
+        self._show_download_progress(backup_id, percent, text)
+
+    def _download_finished(self, backup_id, target, size, name):
+        self._downloading = None
+        self._download_cancel.clear()
+        self._hide_progress()
+        self._refresh_list()
+        try:
+            real = os.path.getsize(target)
+        except OSError:
+            real = 0
+        self._set_status(i18n.t("Downloaded “{name}”: {size} → {path}", name=name,
+                                size=core.human_size(real or size),
+                                path=short_path(target, 96)), OK_TEXT)
+
+    def _download_cancelled(self, backup_id, target):
+        """Stop na karcie: rclone ubity, pliki .partial usunięte przez cloud.py."""
+        self._downloading = None
+        self._download_cancel.clear()
+        self._hide_progress()
+        self._refresh_list()
+        self._set_status(i18n.t("Download stopped — no file was saved."), WARN_TEXT)
+
+    def _download_failed(self, backup_id, message):
+        self._downloading = None
+        self._download_cancel.clear()
+        self._hide_progress()
+        self._refresh_list()
+        self._set_status(i18n.t("Download failed: {message}", message=message), ERR_TEXT)
+
+    def _show_download_progress(self, backup_id, percent, text):
+        """Pasek postępu pobierania; Google Drive raportuje procent dopiero na końcu."""
+        if not self.progress_row:
+            return
+        if not self.progress_row.winfo_manager():
+            self.progress_row.pack(fill="x", before=self.status)
+        bar = self.progress_bar
+        if percent <= 0:
+            if str(bar.cget("mode")) != "indeterminate":
+                bar.configure(mode="indeterminate")
+            bar.start()
+            self.lbl_progress.configure(text="")
+        else:
+            if str(bar.cget("mode")) != "determinate":
+                bar.stop()
+                bar.configure(mode="determinate")
+            bar.set(max(0.0, min(1.0, percent / 100)))
+            self.lbl_progress.configure(text=f"{percent}%")
+        self._set_status(text, MUTED)
+        card_label = self._detail_labels.get(backup_id)
+        if card_label is not None:
+            try:
+                card_label.configure(text=text, text_color=ACCENT)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _free_download_path(folder, filename):
+        """Nie nadpisuj istniejącego pliku: „kopia.zip”, „kopia (2).zip”, …"""
+        stem, ext = os.path.splitext(filename)
+        candidate = os.path.join(folder, filename)
+        counter = 2
+        while os.path.exists(candidate):
+            candidate = os.path.join(folder, f"{stem} ({counter}){ext}")
+            counter += 1
+        return candidate
+
+    @staticmethod
+    def _cloud_when(modified):
+        """Data pliku w chmurze (UTC z rclone) w ludzkim formacie lokalnym."""
+        if not modified:
+            return ""
+        try:
+            stamp = datetime.datetime.fromisoformat(modified.replace("Z", "+00:00"))
+        except ValueError:
+            return ""
+        if stamp.tzinfo is not None:
+            stamp = stamp.astimezone().replace(tzinfo=None)
+        return core.human_when(stamp.isoformat(timespec="seconds"))
+
     def _set_status(self, text, color=SUBTLE):
         self.status.configure(text=text, text_color=color)
 
@@ -609,7 +840,12 @@ class BackupApp:
                 APP_NAME, i18n.t("Copying is in progress. Close the app?"),
                 parent=self.root):
             return
+        if self._downloading and not messagebox.askyesno(
+                APP_NAME, i18n.t("A download is in progress. Close the app?"),
+                parent=self.root):
+            return
         self._cancel_flag.set()
+        self._download_cancel.set()
         try:
             cloud.kill_active()
         except Exception:

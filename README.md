@@ -24,6 +24,10 @@ Windows may show an "unknown publisher" warning — click **More info** → **Ru
   automatically and the section shows whether they were found on this computer.
 - **Cloud** — destination can be **Dropbox** or **Google Drive**. Sign-in happens in the
   browser; the token is kept on your machine only.
+- **Get it back** — a backup with a cloud destination has a **Download** button: it first
+  checks the copy in the cloud and shows its size and date, then saves the archive wherever
+  you point it. An existing file is never overwritten (`kopia (2).zip` instead). While it runs
+  the row turns into **Stop** — a stopped download leaves no half file behind.
 
 ![Settings](docs/settings.png)
 

@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import backup_core as core
 import cloud
+import i18n
 
 
 def write(path, content="x"):
@@ -213,6 +214,172 @@ class RcloneConfigTests(unittest.TestCase):
 
     def test_garbage_authorize_output_returns_none(self):
         self.assertIsNone(cloud._extract_token("Paste the following into your remote machine --->\n<---End paste"))
+
+
+class CloudDownloadTests(unittest.TestCase):
+    """Sprawdzenie i pobranie kopii z chmury — rclone mockowany, bez sieci."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="bt-dl-")
+
+    def _exe(self):
+        return mock.patch.object(cloud, "rclone_exe", return_value="C:/rclone.exe")
+
+    def _ready(self, value=True):
+        return mock.patch.object(cloud, "remote_ready", return_value=value)
+
+    def test_remote_file_reports_size_and_date(self):
+        payload = ('{"Path":"Kopia.zip","Name":"Kopia.zip","Size":123,'
+                   '"ModTime":"2026-10-19T08:18:09.508Z","IsDir":false}')
+        completed = mock.Mock(returncode=0, stdout=payload, stderr="")
+        with self._ready(), self._exe(), \
+                mock.patch.object(cloud.subprocess, "run", return_value=completed) as run:
+            info = cloud.remote_file("gdrive", "Backups/Gry", "Kopia.zip")
+
+        self.assertEqual(info["size"], 123)
+        self.assertEqual(info["modified"], "2026-10-19T08:18:09.508Z")
+        self.assertEqual(run.call_args[0][0][1:4],
+                         ["lsjson", "gdrive:Backups/Gry/Kopia.zip", "--stat"])
+
+    def test_remote_file_missing_returns_none(self):
+        completed = mock.Mock(
+            returncode=3, stdout="",
+            stderr="2026/10/19 14:17:33 NOTICE: Failed to lsjson: directory not found\n")
+        with self._ready(), self._exe(), \
+                mock.patch.object(cloud.subprocess, "run", return_value=completed):
+            self.assertIsNone(cloud.remote_file("dropbox", "Backups", "Kopia.zip"))
+
+    def test_remote_file_without_token_raises(self):
+        with self._exe(), self._ready(False):
+            with self.assertRaises(cloud.CloudError):
+                cloud.remote_file("dropbox", "", "Kopia.zip")
+
+    def test_remote_ref_handles_root_and_nested_paths(self):
+        self.assertEqual(cloud._remote_ref("dropbox", "", "a.zip"), "dropbox:a.zip")
+        self.assertEqual(cloud._remote_ref("gdrive", "/Backups/Gry/", "a.zip"),
+                         "gdrive:Backups/Gry/a.zip")
+        self.assertEqual(cloud._remote_ref("gdrive", "\\Kopie\\", "a.zip"),
+                         "gdrive:Kopie/a.zip")
+
+    def test_download_file_copies_one_archive(self):
+        seen = {}
+
+        def fake_run(args, on_percent=None, should_stop=None, action="upload"):
+            seen["args"] = list(args)
+            seen["action"] = action
+            write(args[3], "zip-bytes")
+
+        local = os.path.join(self.tmp, "Kopia.zip")
+        with self._exe(), mock.patch.object(cloud, "_run_rclone", side_effect=fake_run):
+            cloud.download_file(local, "gdrive", "Backups/Gry", "Kopia.zip")
+
+        self.assertEqual(seen["args"][1:3],
+                         ["copyto", "gdrive:Backups/Gry/Kopia.zip"])
+        self.assertEqual(seen["args"][3], local)
+        self.assertEqual(seen["action"], "download")
+        self.assertTrue(os.path.isfile(local))
+
+    def test_download_file_reports_missing_output(self):
+        local = os.path.join(self.tmp, "brak.zip")
+        with self._exe(), mock.patch.object(cloud, "_run_rclone", return_value=None):
+            with self.assertRaises(cloud.CloudError):
+                cloud.download_file(local, "gdrive", "", "brak.zip")
+
+    def test_download_creates_missing_target_folder(self):
+        local = os.path.join(self.tmp, "nowy", "podfolder", "Kopia.zip")
+
+        def fake_run(args, on_percent=None, should_stop=None, action="upload"):
+            write(args[3], "x")
+
+        with self._exe(), mock.patch.object(cloud, "_run_rclone", side_effect=fake_run):
+            cloud.download_file(local, "dropbox", "Backups", "Kopia.zip")
+        self.assertTrue(os.path.isfile(local))
+
+    def test_cancelled_download_leaves_no_partial_file(self):
+        local = os.path.join(self.tmp, "Kopia.zip")
+        partial = os.path.join(self.tmp, "Kopia.zip.1dfc9770.partial")
+        write(partial, "kawalek")
+
+        def stop_run(args, on_percent=None, should_stop=None, action="upload"):
+            raise cloud.CloudError("Przerwano pobieranie.")
+
+        with self._exe(), mock.patch.object(cloud, "_run_rclone", side_effect=stop_run):
+            with self.assertRaises(cloud.CloudError):
+                cloud.download_file(local, "gdrive", "Backups", "Kopia.zip")
+
+        self.assertFalse(os.path.exists(partial))
+        self.assertFalse(os.path.exists(local))
+
+    def test_finished_download_clears_stale_partial(self):
+        local = os.path.join(self.tmp, "Kopia.zip")
+        partial = os.path.join(self.tmp, "Kopia.zip.deadbeef.partial")
+        write(partial, "kawalek")
+
+        def ok_run(args, on_percent=None, should_stop=None, action="upload"):
+            write(args[3], "zip")
+
+        with self._exe(), mock.patch.object(cloud, "_run_rclone", side_effect=ok_run):
+            cloud.download_file(local, "gdrive", "Backups", "Kopia.zip")
+        self.assertFalse(os.path.exists(partial))
+        self.assertTrue(os.path.isfile(local))
+
+
+class DownloadUiHelperTests(unittest.TestCase):
+    """Pomocnicze funkcje UI pobierania (bez okna Tk)."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import threading
+            import app  # noqa: F401 - wymaga customtkinter
+        except Exception:  # pragma: no cover - brak GUI w środowisku testowym
+            raise unittest.SkipTest("customtkinter not available")
+        import app as app_module
+        cls.helpers = app_module.BackupApp
+        cls.threading = threading
+
+    def setUp(self):
+        i18n.set_language("pl")
+        self.tmp = tempfile.mkdtemp(prefix="bt-dl-name-")
+
+    def tearDown(self):
+        i18n.set_language("en")
+
+    def _bare_app(self):
+        """Obiekt klasy aplikacji bez budowania okna — do testu samego Stop."""
+        instance = object.__new__(self.helpers)
+        instance._downloading = "id-1"
+        instance._download_cancel = self.threading.Event()
+        instance.status = mock.Mock()
+        return instance
+
+    def test_stop_sets_the_cancel_flag(self):
+        instance = self._bare_app()
+        instance._toggle_download("id-1")
+        self.assertTrue(instance._download_cancel.is_set())
+
+    def test_stop_ignores_another_row(self):
+        instance = self._bare_app()
+        instance._toggle_download("id-2")
+        self.assertFalse(instance._download_cancel.is_set())
+
+    def test_existing_file_is_not_overwritten(self):
+        write(os.path.join(self.tmp, "Kopia.zip"), "stara")
+        target = self.helpers._free_download_path(self.tmp, "Kopia.zip")
+        self.assertEqual(os.path.basename(target), "Kopia (2).zip")
+        write(target, "nowa")
+        third = self.helpers._free_download_path(self.tmp, "Kopia.zip")
+        self.assertEqual(os.path.basename(third), "Kopia (3).zip")
+
+    def test_free_path_keeps_plain_name_when_empty(self):
+        self.assertEqual(os.path.basename(self.helpers._free_download_path(self.tmp, "A.zip")),
+                         "A.zip")
+
+    def test_cloud_date_is_shown_in_local_time(self):
+        when = self.helpers._cloud_when("2026-10-19T08:18:09.508Z")
+        self.assertRegex(when, r"\d{2}:\d{2}")
+        self.assertEqual(self.helpers._cloud_when(""), "")
+        self.assertEqual(self.helpers._cloud_when("bzdura"), "")
 
 
 if __name__ == "__main__":
