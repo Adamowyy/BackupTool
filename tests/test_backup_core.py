@@ -338,6 +338,13 @@ class HumanFormatTests(unittest.TestCase):
         self.assertEqual(core.human_when(""), "—")
         self.assertEqual(core.human_when("nie-data"), "—")
 
+    def test_age_days(self):
+        now = core.datetime.datetime.now()
+        self.assertEqual(core.age_days(now.isoformat(timespec="seconds")), 0)
+        self.assertEqual(core.age_days((now - core.datetime.timedelta(days=13)).isoformat()), 13)
+        self.assertEqual(core.age_days(""), None)
+        self.assertEqual(core.age_days("nie-data"), None)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

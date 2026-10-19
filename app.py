@@ -33,8 +33,11 @@ ACCENT_HOVER = "#2563eb"
 ON_ACCENT = "#ffffff"
 OK_BG = "#12351f"
 OK_TEXT = "#4ade80"
+WARN_BG = "#3a2a12"
 ERR_BG = "#3a1a1d"
 ERR_TEXT = "#f87171"
+STALE_BG = "#3a1a1d"
+STALE_TEXT = "#ef4444"
 WARN_TEXT = "#fbbf24"
 DANGER = "#dc2626"
 DANGER_SOFT = "#3a1a1d"
@@ -49,6 +52,10 @@ F_SMALL = ("Segoe UI", 12)
 F_MUTED = ("Segoe UI", 11)
 F_BADGE = ("Segoe UI", 11, "bold")
 F_BUTTON = ("Segoe UI", 13, "bold")
+
+# Plakietka świeżości: zielona do 2 tygodni, pomarańczowa do miesiąca, potem czerwona.
+BADGE_FRESH_DAYS = 14
+BADGE_STALE_DAYS = 30
 
 def resource_path(*parts):
     base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
@@ -115,6 +122,7 @@ class BackupApp:
         self._queue = queue.Queue()
         self._detail_labels = {}
         self._start_buttons = {}
+        self._ready_this_session = set()
         self._running_id = None
         self._batch_queue = []
         self._batch_total = 0
@@ -355,8 +363,21 @@ class BackupApp:
         if last.get("cancelled"):
             return (i18n.t("Stopped"), CARD_SEL, WARN_TEXT)
         if last.get("ok"):
-            return (f"{i18n.t('Ready')} · {core.human_when(last.get('at'))}", OK_BG, OK_TEXT)
+            when = core.human_when(last.get("at"))
+            # "Gotowe" ma sens tylko tuż po przebiegu w tej sesji; po restarcie
+            # zostaje sama data, żeby plakietka nie sugerowała świeżego kopiowania.
+            text = (f"{i18n.t('Ready')} · {when}"
+                    if backup["id"] in self._ready_this_session else when)
+            return (text, *self._age_colors(last.get("at")))
         return (i18n.t("Error"), ERR_BG, ERR_TEXT)
+
+    def _age_colors(self, iso):
+        days = core.age_days(iso)
+        if days is None or days <= BADGE_FRESH_DAYS:
+            return (OK_BG, OK_TEXT)
+        if days <= BADGE_STALE_DAYS:
+            return (WARN_BG, WARN_TEXT)
+        return (STALE_BG, STALE_TEXT)
 
     def _sources_line(self, backup):
         data = core.normalize_app_data(backup.get("app_data"))
@@ -548,6 +569,8 @@ class BackupApp:
         if backup:
             core.apply_result(backup, result)
             core.save_state(self.state)
+            if result.get("ok"):
+                self._ready_this_session.add(backup_id)
 
         self._running_id = None
         self._cancel_flag.clear()

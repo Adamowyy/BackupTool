@@ -158,6 +158,16 @@ def human_size(num) -> str:
         text = text.replace(".", ",")
     return text + " " + units[index]
 
+def age_days(iso: str):
+    """Ile dni kalendarzowych minęło od ISO albo None, gdy data jest zła."""
+    if not iso:
+        return None
+    try:
+        moment = datetime.datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return None
+    return (datetime.datetime.now().date() - moment.date()).days
+
 def human_when(iso: str) -> str:
     """"dziś 20:41" / "wczoraj 09:12" / "3 dni temu" / data."""
     if not iso:
@@ -166,8 +176,7 @@ def human_when(iso: str) -> str:
         moment = datetime.datetime.fromisoformat(iso)
     except (TypeError, ValueError):
         return "—"
-    now = datetime.datetime.now()
-    delta_days = (now.date() - moment.date()).days
+    delta_days = age_days(iso)
     if delta_days == 0:
         return i18n.t("today {time}", time=f"{moment:%H:%M}")
     if delta_days == 1:
