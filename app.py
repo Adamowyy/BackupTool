@@ -4,6 +4,7 @@ import queue
 import sys
 import threading
 import time
+import tkinter as tk
 import traceback
 from tkinter import filedialog, messagebox
 
@@ -13,6 +14,7 @@ import appdata_detect
 import backup_core as core
 import cloud
 import i18n
+import list_backup
 
 if sys.stdout is None:
     sys.stdout = open(os.devnull, "w", encoding="utf-8")
@@ -133,6 +135,7 @@ class BackupApp:
         self._worker = None
         self._downloading = None
         self._download_cancel = threading.Event()
+        self._list_working = False
 
         self._build_ui()
         self._refresh_list()
@@ -179,6 +182,12 @@ class BackupApp:
             fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=ON_ACCENT,
             corner_radius=10, font=F_BUTTON)
         self.btn_new.pack(side="right")
+
+        self.btn_menu = make_button(
+            actions, "☰  " + i18n.t("Menu"), self._open_menu, width=110, height=40,
+            fg_color="transparent", hover_color=CARD_SEL, text_color=TEXT,
+            border_width=1, border_color=BORDER, corner_radius=10, font=F_BUTTON)
+        self.btn_menu.pack(side="right", padx=(0, 10))
 
         lang_box = ctk.CTkFrame(actions, fg_color="transparent")
         lang_box.pack(side="right", padx=(0, 10))
@@ -321,6 +330,7 @@ class BackupApp:
         actions.pack(side="right", padx=(16, 0))
         running = backup["id"] == self._running_id
         downloading = backup["id"] == self._downloading
+        problem = core.setup_problem(backup)
         if downloading:
             stop_style = dict(fg_color=DANGER_SOFT, hover_color=DANGER_SOFT_HOVER,
                               text_color=ERR_TEXT, border_width=0)
@@ -328,6 +338,17 @@ class BackupApp:
                 actions, i18n.t("Stop"),
                 lambda bid=backup["id"]: self._toggle_download(bid),
                 width=96, height=34, corner_radius=9, font=F_BUTTON, **stop_style)
+            btn_start.pack(side="right")
+        elif problem and not running:
+            # Po przywróceniu listy na innym komputerze źródło może nie istnieć,
+            # więc zamiast błędu po Start wiersz prowadzi do ustawień.
+            btn_start = make_button(
+                actions, i18n.t("Set up"),
+                lambda bid=backup["id"], reason=problem: self._fix_backup(bid, reason),
+                width=96, height=34, fg_color=DANGER_SOFT,
+                hover_color=DANGER_SOFT_HOVER, text_color=ERR_TEXT,
+                border_width=1, border_color=DANGER,
+                corner_radius=9, font=F_BUTTON)
             btn_start.pack(side="right")
         else:
             style = dict(fg_color=DANGER_SOFT, hover_color=DANGER_SOFT_HOVER,
@@ -364,13 +385,14 @@ class BackupApp:
         name_row.pack(fill="x")
         ctk.CTkLabel(name_row, text=backup.get("name") or "-", font=F_NAME,
                      text_color=TEXT, anchor="w").pack(side="left")
-        text, fg, fg_text = self._badge_for(backup)
+        text, fg, fg_text = self._badge_for(backup, problem)
         ctk.CTkLabel(name_row, text=text, font=F_BADGE, text_color=fg_text,
                      fg_color=fg, corner_radius=6, height=22, padx=9).pack(
             side="left", padx=(10, 0))
 
         ctk.CTkLabel(info, text=self._sources_line(backup), font=F_SMALL,
-                     text_color=MUTED, anchor="w", wraplength=560).pack(
+                     text_color=ERR_TEXT if core.missing_sources(backup) else MUTED,
+                     anchor="w", wraplength=560).pack(
             fill="x", pady=(5, 0))
         label = ctk.CTkLabel(info, text=self._target_line(backup), font=F_SMALL,
                              text_color=SUBTLE, anchor="w", justify="left",
@@ -379,11 +401,13 @@ class BackupApp:
         self._detail_labels[backup["id"]] = label
         self._start_buttons[backup["id"]] = btn_start
 
-    def _badge_for(self, backup):
+    def _badge_for(self, backup, problem=None):
         if backup["id"] == self._running_id:
             return (i18n.t("Running…"), CARD_SEL, ACCENT)
         if backup["id"] == self._downloading:
             return (i18n.t("Downloading…"), CARD_SEL, INFO_TEXT)
+        if problem:
+            return (i18n.t("Needs setup"), STALE_BG, STALE_TEXT)
         last = backup.get("last_run")
         if not last:
             return (i18n.t("New"), CARD_SEL, SUBTLE)
@@ -440,6 +464,12 @@ class BackupApp:
 
     def _new_backup(self):
         BackupDialog(self)
+
+    def _fix_backup(self, backup_id, reason=""):
+        """Czerwony „Konfiguruj”: pokaż powód i otwórz ustawienia tego backupu."""
+        if reason:
+            self._set_status(reason, WARN_TEXT)
+        self._edit_backup(backup_id)
 
     def _edit_backup(self, backup_id):
         backup = core.get_backup(self.state, backup_id)
@@ -558,6 +588,14 @@ class BackupApp:
                     self._download_cancelled(*payload)
                 elif kind == "download_failed":
                     self._download_failed(*payload)
+                elif kind == "list_percent":
+                    self._list_percent(*payload)
+                elif kind == "list_saved":
+                    self._list_saved(*payload)
+                elif kind == "list_restore_ready":
+                    self._list_restore_ready(*payload)
+                elif kind == "list_failed":
+                    self._list_failed(*payload)
         except queue.Empty:
             pass
         self.root.after(80, self._poll_queue)
@@ -831,6 +869,198 @@ class BackupApp:
         if stamp.tzinfo is not None:
             stamp = stamp.astimezone().replace(tzinfo=None)
         return core.human_when(stamp.isoformat(timespec="seconds"))
+
+    # ---- lista backupów: kopia i przywracanie --------------------------
+    def _open_menu(self):
+        """Menu aplikacji: kopia listy i przywracanie listy (lokalnie / chmura)."""
+        menu = self._build_menu()
+        try:
+            x = self.btn_menu.winfo_rootx()
+            y = self.btn_menu.winfo_rooty() + self.btn_menu.winfo_height() + 4
+            menu.tk_popup(x, y)
+        finally:
+            menu.grab_release()
+
+    def _build_menu(self):
+        """Buduje menu od zera, bo lista chmur zmienia się po połączeniu konta."""
+        providers = [name for name in ("dropbox", "gdrive") if cloud.remote_ready(name)]
+        menu = self._make_menu(self.root)
+        save = self._make_menu(menu)
+        restore = self._make_menu(menu)
+        save.add_command(label=i18n.t("Local…"), command=self._save_list_local)
+        restore.add_command(label=i18n.t("Local…"), command=self._restore_list_local)
+        for provider in providers:
+            label = cloud.PROVIDER_LABELS.get(provider, provider)
+            save.add_command(label=label,
+                             command=lambda p=provider: self._save_list_cloud(p))
+            restore.add_command(label=label,
+                                command=lambda p=provider: self._restore_list_cloud(p))
+        if not providers:
+            for submenu in (save, restore):
+                submenu.add_command(label=i18n.t("Cloud — no account connected"),
+                                    state="disabled")
+        menu.add_cascade(label=i18n.t("Backup list"), menu=save)
+        menu.add_cascade(label=i18n.t("Restore list"), menu=restore)
+        return menu
+
+    @staticmethod
+    def _make_menu(parent):
+        """Ciemne menu w stylu okna (tk.Menu, więc zachowuje się jak natywne)."""
+        return tk.Menu(parent, tearoff=0, bg=CARD, fg=TEXT, bd=0,
+                       activebackground=ACCENT, activeforeground=ON_ACCENT,
+                       activeborderwidth=0, relief="flat", font=F_SMALL)
+
+    def _list_ready(self):
+        """Czy można ruszyć operację na liście, czyli nic nie trwa w tle."""
+        if self._running_id or self._downloading or self._list_working:
+            self._set_status(i18n.t("Finish the current run first."), WARN_TEXT)
+            return False
+        return True
+
+    def _has_backups(self):
+        if self.state.get("backups"):
+            return True
+        self._set_status(i18n.t("The list is empty — add a backup first."), WARN_TEXT)
+        return False
+
+    def _save_list_local(self):
+        if not self._list_ready() or not self._has_backups():
+            return
+        target = filedialog.asksaveasfilename(
+            parent=self.root, title=i18n.t("Save the list of backups"),
+            initialfile=list_backup.suggested_filename(), defaultextension=".json",
+            filetypes=[(i18n.t("JSON file"), "*.json"), (i18n.t("All files"), "*.*")])
+        if not target:
+            return
+        try:
+            list_backup.dump_payload(list_backup.build_payload(self.state), target)
+        except list_backup.ListError as exc:
+            self._set_status(str(exc), ERR_TEXT)
+            return
+        self._set_status(i18n.t("Saved the list of {count}: {path}",
+                                count=plural(len(self.state["backups"]), "backup",
+                                             "backups", "backups5"),
+                                path=short_path(target, 96)), OK_TEXT)
+
+    def _save_list_cloud(self, provider):
+        if not self._list_ready() or not self._has_backups():
+            return
+        self._list_working = True
+        text = i18n.t("Uploading the list to {provider}…",
+                      provider=cloud.PROVIDER_LABELS.get(provider, provider))
+        self._show_download_progress(None, 0, text)
+        payload = list_backup.build_payload(self.state)
+        threading.Thread(target=self._save_list_worker, args=(payload, provider),
+                         daemon=True).start()
+
+    def _save_list_worker(self, payload, provider):
+        def percent(value):
+            self._queue.put(("list_percent", (provider, value)))
+
+        try:
+            info = list_backup.cloud_upload(payload, provider, on_percent=percent)
+        except Exception as exc:  # noqa: BLE001 - komunikat list_backup jest gotowy
+            self._queue.put(("list_failed", (str(exc),)))
+            return
+        self._queue.put(("list_saved",
+                         (provider, len(payload.get("backups") or []), info)))
+
+    def _list_percent(self, provider, percent):
+        if not self._list_working:
+            return
+        self._show_download_progress(
+            None, percent,
+            i18n.t("Uploading the list to {provider}…",
+                   provider=cloud.PROVIDER_LABELS.get(provider, provider)))
+
+    def _list_saved(self, provider, count, info):
+        self._list_working = False
+        self._hide_progress()
+        info = info or {}
+        label = cloud.PROVIDER_LABELS.get(provider, provider)
+        text = i18n.t("The list of {count} is in {provider} ({size})",
+                      count=plural(count, "backup", "backups", "backups5"),
+                      provider=label, size=core.human_size(info.get("size") or 0))
+        when = self._cloud_when(info.get("modified") or "")
+        if when:
+            text += f" · {when}"
+        self._set_status(text, OK_TEXT)
+
+    def _list_failed(self, message):
+        self._list_working = False
+        self._hide_progress()
+        self._set_status(message, ERR_TEXT)
+
+    def _restore_list_local(self):
+        if not self._list_ready():
+            return
+        path = filedialog.askopenfilename(
+            parent=self.root, title=i18n.t("Open a list of backups"),
+            filetypes=[(i18n.t("JSON file"), "*.json"), (i18n.t("All files"), "*.*")])
+        if not path:
+            return
+        try:
+            payload = list_backup.read_payload(path)
+        except list_backup.ListError as exc:
+            messagebox.showerror(APP_NAME, str(exc), parent=self.root)
+            return
+        self._confirm_restore(payload, os.path.basename(path))
+
+    def _restore_list_cloud(self, provider):
+        if not self._list_ready():
+            return
+        self._list_working = True
+        text = i18n.t("Downloading the list from {provider}…",
+                      provider=cloud.PROVIDER_LABELS.get(provider, provider))
+        self._show_download_progress(None, 0, text)
+        threading.Thread(target=self._restore_list_worker, args=(provider,),
+                         daemon=True).start()
+
+    def _restore_list_worker(self, provider):
+        try:
+            payload = list_backup.cloud_download(provider)
+        except Exception as exc:  # noqa: BLE001 - błąd chmury trafia do statusu
+            self._queue.put(("list_failed", (str(exc),)))
+            return
+        self._queue.put(("list_restore_ready", (payload, provider)))
+
+    def _list_restore_ready(self, payload, provider):
+        self._list_working = False
+        self._hide_progress()
+        info = payload.get("info") or {}
+        label = cloud.PROVIDER_LABELS.get(provider, provider)
+        when = self._cloud_when(info.get("modified") or "")
+        if when:
+            label = f"{label} · {when}"
+        self._confirm_restore(payload, label)
+
+    def _confirm_restore(self, payload, source):
+        """Lista z pliku zastąpi obecną, więc pytamy, bo tego nie da się cofnąć."""
+        incoming = payload.get("backups") or []
+        current = len(self.state.get("backups") or [])
+        self._set_status(i18n.t("Restoring the list…"), MUTED)
+        question = i18n.t(
+            "Replace the current list ({current}) with {incoming} from {source}?\n\n"
+            "The backup files themselves are not touched — only the list and its "
+            "settings.",
+            current=plural(current, "backup", "backups", "backups5"),
+            incoming=plural(len(incoming), "backup", "backups", "backups5"),
+            source=source)
+        if not messagebox.askyesno(i18n.t("Restore the list?"), question,
+                                   parent=self.root):
+            self._set_status(i18n.t("Restoring the list cancelled."), WARN_TEXT)
+            return
+        self.state["backups"] = incoming
+        core.save_state(self.state)
+        self._ready_this_session.clear()
+        self._refresh_list()
+        text = i18n.t("Restored the list: {count}",
+                      count=plural(len(incoming), "backup", "backups", "backups5"))
+        missing = list_backup.missing_sources(incoming)
+        if missing:
+            text += " · " + i18n.t("{missing} sources are missing on this computer",
+                                   missing=missing)
+        self._set_status(text, OK_TEXT if not missing else WARN_TEXT)
 
     def _set_status(self, text, color=SUBTLE):
         self.status.configure(text=text, text_color=color)

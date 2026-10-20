@@ -254,6 +254,12 @@ def _normalize_backup(raw) -> dict:
         "last_run": last_run if isinstance(last_run, dict) else None,
     }
 
+def normalize_backups(raw) -> list:
+    """Lista wpisów z surowych danych JSON, wspólna dla stanu i pliku listy."""
+    if not isinstance(raw, list):
+        return []
+    return [_normalize_backup(item) for item in raw if isinstance(item, dict)]
+
 def load_state(path: str | None = None) -> dict:
     """Wczytuje zapisane backupy; uszkodzony plik nie wywala aplikacji."""
     path = path or default_state_path()
@@ -264,10 +270,7 @@ def load_state(path: str | None = None) -> dict:
     except (OSError, ValueError):
         return state
     if isinstance(raw, dict):
-        backups = raw.get("backups")
-        if isinstance(backups, list):
-            state["backups"] = [_normalize_backup(item) for item in backups
-                                if isinstance(item, dict)]
+        state["backups"] = normalize_backups(raw.get("backups"))
         language = raw.get("language")
         if isinstance(language, str) and language in i18n.LANGUAGES:
             state["language"] = language
@@ -351,6 +354,44 @@ def _path_inside(child: str, parent: str) -> bool:
         return False
     return child_abs == parent_abs or child_abs.startswith(parent_abs + os.sep)
 
+def missing_sources(backup: dict) -> list:
+    """Źródła zapisane w backupie, których nie ma teraz na dysku.
+
+    Po przywróceniu listy na innym komputerze ścieżki mogą nie istnieć,
+    wtedy wiersz pokazuje „Wymaga konfiguracji” zamiast błędu po kliknięciu Start.
+    """
+    return [source for source in (backup.get("sources") or [])
+            if source and not os.path.exists(source)]
+
+def _drive_available(path: str) -> bool:
+    """Czy dysk z tej ścieżki jest podłączony (D:\\ znika po restarcie na innym PC)."""
+    drive, _ = os.path.splitdrive(os.path.abspath(path))
+    if not drive:
+        return True
+    return os.path.exists(drive + os.sep)
+
+def setup_problem(backup: dict):
+    """Co trzeba poprawić, żeby backup ruszył, albo None, gdy wszystko gra."""
+    missing = missing_sources(backup)
+    if missing:
+        return i18n.t("Source not found: {path}", path=missing[0])
+    data = normalize_app_data(backup.get("app_data"))
+    if not (backup.get("sources") or data["hermes"] or data["obsidian"]):
+        return i18n.t("Add a source or enable app data (Hermes / Obsidian).")
+    provider = cloud_provider(backup)
+    if provider != "none":
+        if not cloud.remote_ready(provider):
+            return i18n.t("{provider} account is not connected — connect it in settings.",
+                          provider=cloud.PROVIDER_LABELS.get(provider, provider))
+        return None
+    destination = (backup.get("destination") or "").strip()
+    if not destination:
+        return i18n.t("Choose a destination.")
+    if not _drive_available(destination):
+        drive = os.path.splitdrive(os.path.abspath(destination))[0]
+        return i18n.t("Drive {drive} is not available on this computer.", drive=drive)
+    return None
+
 def validate_backup(backup: dict, state: dict | None = None, detection=None):
     """Zwraca komunikat błędu albo None, gdy backup można zapisać/uruchomić."""
     name = (backup.get("name") or "").strip()
@@ -363,9 +404,9 @@ def validate_backup(backup: dict, state: dict | None = None, detection=None):
     uses_app_data = bool(data["hermes"] or data["obsidian"])
     if not sources and not uses_app_data:
         return i18n.t("Add a source or enable app data (Hermes / Obsidian).")
-    for source in sources:
-        if not os.path.exists(source):
-            return i18n.t("Source not found: {path}", path=source)
+    missing = missing_sources(backup)
+    if missing:
+        return i18n.t("Source not found: {path}", path=missing[0])
     provider = cloud_provider(backup)
     destination = ""
     if provider != "none":

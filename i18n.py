@@ -35,6 +35,10 @@ PL = {
     "Series finished": "Seria zakończona",
     "Error": "Błąd",
     "Ready": "Gotowe",
+    "Needs setup": "Wymaga konfiguracji",
+    "Set up": "Konfiguruj",
+    "Drive {drive} is not available on this computer.":
+        "Dysk {drive} nie jest dostępny na tym komputerze.",
     "Copied": "Skopiowano",
     "Preparing…": "Przygotowanie…",
     "Scanning files…": "Skanowanie plików…",
@@ -259,6 +263,44 @@ PL = {
     "Opening the browser — sign in and approve access…":
         "Otwieram przeglądarkę — zaloguj się i zatwierdź dostęp…",
     "Uploading files to {provider}…": "Wysyłam pliki do {provider}…",
+
+    # Menu: kopia i przywracanie listy backupów
+    "Menu": "Menu",
+    "Backup list": "Backup listy",
+    "Restore list": "Przywróć listę",
+    "Local…": "Lokalnie…",
+    "Cloud — no account connected": "Chmura — brak połączonego konta",
+    "Save the list of backups": "Zapisz listę backupów",
+    "Open a list of backups": "Otwórz listę backupów",
+    "JSON file": "Plik JSON",
+    "All files": "Wszystkie pliki",
+    "The list is empty — add a backup first.":
+        "Lista jest pusta — najpierw dodaj backup.",
+    "Uploading the list to {provider}…": "Wysyłam listę do {provider}…",
+    "Downloading the list from {provider}…": "Pobieram listę z {provider}…",
+    "The list of {count} is in {provider} ({size})":
+        "Lista ({count}) jest w {provider} ({size})",
+    "Saved the list of {count}: {path}": "Zapisano listę: {count} → {path}",
+    "Restoring the list…": "Przywracam listę…",
+    "Restoring the list cancelled.": "Przywracanie listy anulowane.",
+    "Restore the list?": "Przywrócić listę?",
+    "Replace the current list ({current}) with {incoming} from {source}?\n\n"
+    "The backup files themselves are not touched — only the list and its settings.":
+        "Zastąpić obecną listę ({current}) listą {incoming} z {source}?\n\n"
+        "Pliki kopii zostają nietknięte — zmieniają się tylko lista i jej ustawienia.",
+    "Restored the list: {count}": "Przywrócono listę: {count}",
+    "{missing} sources are missing on this computer":
+        "brakuje {missing} źródeł na tym komputerze",
+    "This file is not a BackupTool list.": "To nie jest lista BackupTool.",
+    "This list is empty — there is nothing to restore.":
+        "Ta lista jest pusta — nie ma czego przywracać.",
+    "Could not read the list: {message}": "Nie udało się odczytać listy: {message}",
+    "Could not save the list: {message}": "Nie udało się zapisać listy: {message}",
+    "Could not restore the list: {message}":
+        "Nie udało się przywrócić listy: {message}",
+    "The list did not reach the cloud.": "Lista nie dotarła do chmury.",
+    "No list in the cloud yet — save it first.":
+        "W chmurze nie ma jeszcze listy — najpierw ją zapisz.",
     "Done": "Gotowe",
     "Done and uploaded": "Gotowe i wysłane",
     "Stopped": "Przerwano",

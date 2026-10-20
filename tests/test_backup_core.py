@@ -7,14 +7,17 @@ Uruchomienie:  python -m unittest discover -s tests -v
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import backup_core as core
+import cloud
 import i18n
 
 i18n.set_language("pl")
@@ -165,6 +168,62 @@ class ValidationTests(unittest.TestCase):
         path = write(os.path.join(self.tmp, "plik.txt"))
         error = core.validate_backup(self.backup(destination=path))
         self.assertIn("folderem", error)
+
+
+class SetupProblemTests(unittest.TestCase):
+    """Co blokuje Start po przywróceniu listy na innym komputerze."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="bt-setup-")
+        self.source = os.path.join(self.tmp, "src")
+        os.makedirs(self.source)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def backup(self, **overrides):
+        data = core.new_backup("Test", [self.source], os.path.join(self.tmp, "out"), True)
+        data.update(overrides)
+        return data
+
+    def test_ready_backup_has_no_problem(self):
+        self.assertIsNone(core.setup_problem(self.backup()))
+        self.assertEqual(core.missing_sources(self.backup()), [])
+
+    def test_missing_folder_is_reported(self):
+        gone = os.path.join(self.tmp, "nie-ma")
+        backup = self.backup(sources=[self.source, gone])
+        self.assertEqual(core.missing_sources(backup), [gone])
+        self.assertIn(gone, core.setup_problem(backup))
+
+    def test_backup_without_sources_needs_setup(self):
+        self.assertIn("Dodaj źródło", core.setup_problem(self.backup(sources=[])))
+
+    def test_empty_destination_needs_setup(self):
+        self.assertIn("Wybierz miejsce zapisu", core.setup_problem(self.backup(destination="")))
+
+    def test_absent_drive_needs_setup(self):
+        backup = self.backup(destination="Q:\\Kopie")
+        with mock.patch.object(core, "_drive_available", return_value=False):
+            problem = core.setup_problem(backup)
+        self.assertIn("Q:", problem)
+        self.assertIn("nie jest dostępny", problem)
+
+    def test_existing_drive_is_fine(self):
+        with mock.patch.object(core.os.path, "exists", return_value=True):
+            self.assertTrue(core._drive_available("D:\\Kopie"))
+
+    def test_disconnected_cloud_needs_setup(self):
+        backup = self.backup(cloud={"provider": "dropbox", "path": "BackupTool"})
+        with mock.patch.object(cloud, "remote_ready", return_value=False):
+            problem = core.setup_problem(backup)
+        self.assertIn("Dropbox", problem)
+        self.assertIn("nie jest połączone", problem)
+
+    def test_connected_cloud_is_fine(self):
+        backup = self.backup(cloud={"provider": "gdrive", "path": "BackupTool"})
+        with mock.patch.object(cloud, "remote_ready", return_value=True):
+            self.assertIsNone(core.setup_problem(backup))
 
 
 class TargetPathTests(unittest.TestCase):

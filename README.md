@@ -28,6 +28,10 @@ Windows may show an "unknown publisher" warning — click **More info** → **Ru
   checks the copy in the cloud and shows its size and date, then saves the archive wherever
   you point it. An existing file is never overwritten (`kopia (2).zip` instead). While it runs
   the row turns into **Stop** — a stopped download leaves no half file behind.
+- **Take the list with you** — the **Menu** button saves the list of backups to a file or to
+  the cloud, and restores it on another machine. After reinstalling Windows you just restore
+  the list and every backup is one click away again; the copies themselves stay where they
+  were and are never touched by this.
 
 ![Settings](docs/settings.png)
 
@@ -37,6 +41,12 @@ Windows may show an "unknown publisher" warning — click **More info** → **Ru
 - ZIP mode builds the archive from scratch, so it always matches the source.
 - Switching between Local, Dropbox and Google Drive keeps the cloud folder you set for
   each of them, so going back to a cloud restores the same path.
+- The list is a plain JSON file. In the cloud it is stored once, at
+  `BackupTool/backup-list.json`, and saving it again replaces that single file.
+- Restoring a list replaces the current one (the app asks first) and reports any sources
+  that do not exist on this computer yet. Rows that are missing a source, a drive or a
+  connected cloud account show **Needs setup** in red and their **Start** becomes **Set up**,
+  which opens the settings instead of failing with an error.
 - SQLite databases are copied through a snapshot, so the copy stays consistent even
   while the source app is running.
 - Cloud uploads always use a single ZIP file — uploading thousands of separate files
@@ -56,8 +66,8 @@ python -m unittest discover -s tests
 ```
 
 Layout: `app.py` (UI), `backup_core.py` (state, copy engine, ZIP, SQLite snapshots),
-`appdata_detect.py` (app data detection), `cloud.py` (rclone), `i18n.py`
-(English/Polish strings).
+`appdata_detect.py` (app data detection), `cloud.py` (rclone), `list_backup.py`
+(list of backups: export, restore, cloud), `i18n.py` (English/Polish strings).
 
 ## License
 
