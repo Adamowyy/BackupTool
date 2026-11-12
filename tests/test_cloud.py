@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Testy integracji chmury (rclone mockowany — bez sieci i bez konta)."""
 
+import json
 import os
 import sys
 import tempfile
@@ -99,6 +100,10 @@ class CloudRunTests(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix="bt-cloudrun-")
         self.source = write(os.path.join(self.tmp, "src", "a.txt"), "A")
         self.uploaded = []
+        # Testy nie mogą pytać prawdziwego konta o sesję.
+        self.session = mock.patch.object(cloud, "require_session", return_value="ok")
+        self.session.start()
+        self.addCleanup(self.session.stop)
 
     def _backup(self, **cloud_data):
         data = {"provider": "dropbox"}
@@ -173,6 +178,33 @@ class CloudRunTests(unittest.TestCase):
             result = core.run_backup(backup)
         self.assertTrue(result["ok"], result["message"])
         upload.assert_not_called()
+
+
+    def test_expired_session_is_flagged_before_zipping(self):
+        backup = self._backup()
+        with mock.patch.object(cloud, "remote_ready", return_value=True), \
+                mock.patch.object(cloud, "require_session",
+                                  side_effect=cloud.CloudAuthError("Sesja wygasła")), \
+                mock.patch.object(cloud, "prepare_upload") as upload:
+            result = core.run_backup(backup)
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["needs_reauth"])
+        upload.assert_not_called()
+        self.assertFalse(os.path.exists(core.staging_path(backup)))
+
+    def test_local_backup_never_checks_the_cloud_session(self):
+        backup = core.new_backup("Lokalny", [self.source], self.tmp, True)
+        with mock.patch.object(cloud, "require_session") as check:
+            result = core.run_backup(backup)
+        check.assert_not_called()
+        self.assertTrue(result["ok"], result["message"])
+
+    def test_result_keeps_the_reauth_flag_for_the_row(self):
+        backup = self._backup()
+        core.apply_result(backup, {"needs_reauth": True, "message": "Sesja wygasła"})
+        self.assertTrue(backup["last_run"]["needs_reauth"])
+        core.apply_result(backup, {"ok": True})
+        self.assertFalse(backup["last_run"]["needs_reauth"])
 
 
 class RcloneConfigTests(unittest.TestCase):
@@ -341,7 +373,8 @@ class CloudDownloadTests(unittest.TestCase):
     def test_download_file_copies_one_archive(self):
         seen = {}
 
-        def fake_run(args, on_percent=None, should_stop=None, action="upload"):
+        def fake_run(args, on_percent=None, should_stop=None, action="upload",
+                 provider=""):
             seen["args"] = list(args)
             seen["action"] = action
             write(args[3], "zip-bytes")
@@ -365,7 +398,8 @@ class CloudDownloadTests(unittest.TestCase):
     def test_download_creates_missing_target_folder(self):
         local = os.path.join(self.tmp, "nowy", "podfolder", "Kopia.zip")
 
-        def fake_run(args, on_percent=None, should_stop=None, action="upload"):
+        def fake_run(args, on_percent=None, should_stop=None, action="upload",
+                 provider=""):
             write(args[3], "x")
 
         with self._exe(), mock.patch.object(cloud, "_run_rclone", side_effect=fake_run):
@@ -377,7 +411,8 @@ class CloudDownloadTests(unittest.TestCase):
         partial = os.path.join(self.tmp, "Kopia.zip.1dfc9770.partial")
         write(partial, "kawalek")
 
-        def stop_run(args, on_percent=None, should_stop=None, action="upload"):
+        def stop_run(args, on_percent=None, should_stop=None, action="upload",
+                 provider=""):
             raise cloud.CloudError("Przerwano pobieranie.")
 
         with self._exe(), mock.patch.object(cloud, "_run_rclone", side_effect=stop_run):
@@ -392,7 +427,8 @@ class CloudDownloadTests(unittest.TestCase):
         partial = os.path.join(self.tmp, "Kopia.zip.deadbeef.partial")
         write(partial, "kawalek")
 
-        def ok_run(args, on_percent=None, should_stop=None, action="upload"):
+        def ok_run(args, on_percent=None, should_stop=None, action="upload",
+               provider=""):
             write(args[3], "zip")
 
         with self._exe(), mock.patch.object(cloud, "_run_rclone", side_effect=ok_run):
@@ -457,6 +493,212 @@ class DownloadUiHelperTests(unittest.TestCase):
         self.assertRegex(when, r"\d{2}:\d{2}")
         self.assertEqual(self.helpers._cloud_when(""), "")
         self.assertEqual(self.helpers._cloud_when("bzdura"), "")
+
+
+class CloudAuthTests(unittest.TestCase):
+    """Wygasły token: prawdziwa przyczyna w komunikacie + odnowienie bez klucza."""
+
+    # Dokładnie to, co rclone wypisuje z --use-json-log (zweryfikowane na żywo).
+    GOOGLE_ERROR = json.dumps({
+        "time": "2026-11-12T00:44:45+01:00",
+        "level": "critical",
+        "msg": 'Failed to create file system for destination "gdrive:Backups/Gry/": '
+               "couldn't find root directory ID: Get "
+               '"https://www.googleapis.com/drive/v3/files/root?alt=json&fields=id'
+               '&prettyPrint=false&supportsAllDrives=true": couldn' + chr(39) + 't fetch '
+               "token: invalid_grant: maybe token expired? - try refreshing with "
+               '"rclone config reconnect gdrive:"',
+    })
+
+    def setUp(self):
+        self._language = i18n.language()
+        i18n.set_language("en")
+        self.tmp = tempfile.mkdtemp(prefix="bt-auth-")
+        self.env = mock.patch.dict(os.environ, {"BACKUPTOOL_RCLONE_CONF":
+                                                os.path.join(self.tmp, "rclone.conf")})
+        self.env.start()
+        cloud.forget_state()
+
+    def tearDown(self):
+        self.env.stop()
+        cloud.forget_state()
+        i18n.set_language(self._language)
+
+    def _conf(self, provider="gdrive", **values):
+        parser = cloud._read_conf()
+        if not parser.has_section(provider):
+            parser.add_section(provider)
+        parser.set(provider, "type", cloud.BACKENDS[provider])
+        for key, value in values.items():
+            parser.set(provider, key, value)
+        cloud._write_conf(parser)
+
+    def _proc(self, lines, code=1):
+        class FakeProc:
+            pid = 4242
+
+            def __init__(self):
+                self.stdout = iter([line + chr(10) for line in lines])
+
+            def wait(self, timeout=None):
+                return code
+
+            def kill(self):
+                pass
+
+        return FakeProc()
+
+    def test_cause_is_found_past_the_truncated_tail(self):
+        self.assertEqual(cloud._auth_problem(self.GOOGLE_ERROR), "expired")
+        # przyczyna bywa dalej niż 300 znaków, którymi kończy się komunikat
+        noisy = "x" * 600 + " invalid_grant: maybe token expired?"
+        self.assertEqual(cloud._auth_problem(noisy), "expired")
+
+    def test_json_log_line_becomes_readable_text(self):
+        message = cloud._error_from_lines([self.GOOGLE_ERROR])
+        self.assertTrue(message.startswith("Failed to create file system"), message)
+        self.assertNotIn('"level"', message)
+
+    def test_expired_message_asks_to_reconnect_not_for_a_new_key(self):
+        message = cloud._auth_message("gdrive", "expired")
+        self.assertIn("Google Drive", message)
+        self.assertIn("Reconnect", message)
+
+    def test_wrong_client_id_is_a_different_problem(self):
+        self.assertEqual(cloud._auth_problem("oauth2: invalid_client"), "client")
+        self.assertIn("client ID", cloud._auth_message("gdrive", "client"))
+
+    def test_upload_with_dead_token_says_reconnect(self):
+        local = write(os.path.join(self.tmp, "Kopia.zip"), "zip")
+        with mock.patch.object(cloud, "rclone_exe", return_value="C:/rclone.exe"), \
+                mock.patch.object(cloud.subprocess, "Popen",
+                                  return_value=self._proc([self.GOOGLE_ERROR])):
+            with self.assertRaises(cloud.CloudAuthError) as caught:
+                cloud.upload_file(local, "gdrive", "Backups/Gry")
+        self.assertIn("Reconnect", str(caught.exception))
+        self.assertIn("expired", str(caught.exception))
+
+    def test_reconnect_reuses_the_saved_client(self):
+        self._conf(client_id="abc.apps.googleusercontent.com", client_secret="sek",
+                   token='{"refresh_token":"r"}')
+        with mock.patch.object(cloud, "authorize") as authorize:
+            cloud.reconnect("gdrive")
+        self.assertEqual(authorize.call_args[0],
+                         ("gdrive", "abc.apps.googleusercontent.com", "sek"))
+
+    def test_reconnect_without_saved_client_explains_what_is_missing(self):
+        with mock.patch.object(cloud, "authorize") as authorize:
+            with self.assertRaises(cloud.CloudError):
+                cloud.reconnect("gdrive")
+        authorize.assert_not_called()
+
+
+class CloudTokenStateTests(unittest.TestCase):
+    """Sprawdzenie sesji w tle: ok / expired / offline, z pamięcią wyniku."""
+
+    def setUp(self):
+        self._language = i18n.language()
+        i18n.set_language("en")
+        self.tmp = tempfile.mkdtemp(prefix="bt-state-")
+        self.env = mock.patch.dict(os.environ, {"BACKUPTOOL_RCLONE_CONF":
+                                                os.path.join(self.tmp, "rclone.conf")})
+        self.env.start()
+        parser = cloud._read_conf()
+        parser.add_section("gdrive")
+        parser.set("gdrive", "type", "drive")
+        parser.set("gdrive", "token", '{"access_token":"a","refresh_token":"r"}')
+        cloud._write_conf(parser)
+        cloud.forget_state()
+
+    def tearDown(self):
+        self.env.stop()
+        cloud.forget_state()
+        i18n.set_language(self._language)
+
+    def _run(self, returncode=0, stderr="", stdout="{}"):
+        completed = mock.Mock(returncode=returncode, stdout=stdout, stderr=stderr)
+        return mock.patch.object(cloud.subprocess, "run", return_value=completed)
+
+    def _exe(self):
+        return mock.patch.object(cloud, "rclone_exe", return_value="C:/rclone.exe")
+
+    def test_working_session_is_ok(self):
+        with self._exe(), self._run():
+            self.assertEqual(cloud.token_state("gdrive"), "ok")
+
+    def test_dead_token_is_expired(self):
+        with self._exe(), self._run(returncode=1, stderr=CloudAuthTests.GOOGLE_ERROR):
+            self.assertEqual(cloud.token_state("gdrive"), "expired")
+
+    def test_no_answer_is_offline_and_not_cached(self):
+        timeout = cloud.subprocess.TimeoutExpired("rclone", 30)
+        with self._exe(), mock.patch.object(cloud.subprocess, "run", side_effect=timeout):
+            self.assertEqual(cloud.token_state("gdrive"), "offline")
+        with self._exe(), self._run() as run:
+            self.assertEqual(cloud.token_state("gdrive"), "ok")
+        self.assertEqual(run.call_count, 1)
+
+    def test_result_is_reused_for_a_while(self):
+        with self._exe(), self._run() as run:
+            cloud.token_state("gdrive")
+            cloud.token_state("gdrive")
+        self.assertEqual(run.call_count, 1)
+
+    def test_require_session_raises_for_a_dead_token(self):
+        with self._exe(), self._run(returncode=1, stderr=CloudAuthTests.GOOGLE_ERROR):
+            with self.assertRaises(cloud.CloudAuthError):
+                cloud.require_session("gdrive")
+
+    def test_require_session_passes_a_working_token(self):
+        with self._exe(), self._run():
+            self.assertEqual(cloud.require_session("gdrive"), "ok")
+
+    def test_disconnected_account_is_missing_without_calling_rclone(self):
+        cloud.forget("gdrive")
+        with mock.patch.object(cloud.subprocess, "run") as run:
+            self.assertEqual(cloud.token_state("gdrive"), "missing")
+        run.assert_not_called()
+
+
+class RenewUiHelperTests(unittest.TestCase):
+    """Wiersz z wygasłą sesją: plakietka i przycisk „Odnów sesję"."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import app as app_module
+        except Exception:  # pragma: no cover - brak GUI w środowisku testowym
+            raise unittest.SkipTest("customtkinter not available")
+        cls.helpers = app_module.BackupApp
+
+    def setUp(self):
+        self._language = i18n.language()
+        i18n.set_language("en")
+
+    def tearDown(self):
+        i18n.set_language(self._language)
+
+    def _bare_app(self):
+        instance = object.__new__(self.helpers)
+        instance._running_id = None
+        instance._downloading = None
+        instance._ready_this_session = set()
+        return instance
+
+    def _backup(self, needs_reauth):
+        backup = core.new_backup("Kopia", [], "", True,
+                                 cloud_settings={"provider": "gdrive"})
+        backup["last_run"] = {"at": core.now_iso(), "ok": False,
+                              "needs_reauth": needs_reauth, "message": ""}
+        return backup
+
+    def test_expired_session_owns_the_badge(self):
+        text, _fg, _fg_text = self._bare_app()._badge_for(self._backup(True))
+        self.assertEqual(text, i18n.t("Session expired"))
+
+    def test_plain_error_still_reads_error(self):
+        text, _fg, _fg_text = self._bare_app()._badge_for(self._backup(False))
+        self.assertEqual(text, i18n.t("Error"))
 
 
 if __name__ == "__main__":

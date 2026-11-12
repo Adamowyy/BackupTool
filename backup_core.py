@@ -683,7 +683,8 @@ def _copy_files(target: str, entries, progress=None, cancelled=None) -> int:
 def run_backup(backup: dict, progress=None, cancelled=None, detection=None) -> dict:
     """Wykonuje backup i zwraca wynik — nigdy nie rzuca wyjątkiem."""
     result = {"ok": False, "cancelled": False, "target": "", "files": 0,
-              "bytes": 0, "seconds": 0.0, "message": "", "at": now_iso()}
+              "bytes": 0, "seconds": 0.0, "message": "", "at": now_iso(),
+              "needs_reauth": False}
     started = time.perf_counter()
     try:
         error = validate_backup(backup, detection=detection)
@@ -693,6 +694,10 @@ def run_backup(backup: dict, progress=None, cancelled=None, detection=None) -> d
         use_zip = use_zip_for(backup)
         target = target_path(dict(backup, use_zip=use_zip))
         provider = cloud_provider(backup)
+        # Sesja sprawdzona PRZED pakowaniem: wygasły token nie ma sensu
+        # kosztować minut zipowania, a UI od razu pokazuje „Odnów sesję".
+        if provider != "none":
+            cloud.require_session(provider)
         result["target"] = display_target(dict(backup, use_zip=use_zip))             if provider != "none" else target
         os.makedirs(os.path.dirname(target) or destination, exist_ok=True)
         if progress:
@@ -719,6 +724,11 @@ def run_backup(backup: dict, progress=None, cancelled=None, detection=None) -> d
     except Cancelled:
         result["cancelled"] = True
         result["message"] = i18n.t("Stopped")
+    except cloud.CloudAuthError as exc:
+        # Sesja padła (Google: 7 dni w trybie Testing) — jedno kliknięcie ją
+        # odnowi tym samym client ID, a kopia pójdzie ponownie.
+        result["needs_reauth"] = True
+        result["message"] = str(exc) or exc.__class__.__name__
     except (BackupError, OSError, zipfile.BadZipFile, shutil.Error,
             cloud.CloudError) as exc:
         result["message"] = str(exc) or exc.__class__.__name__
@@ -740,5 +750,6 @@ def apply_result(backup: dict, result: dict) -> dict:
         "files": int(result.get("files") or 0),
         "bytes": int(result.get("bytes") or 0),
         "seconds": float(result.get("seconds") or 0),
+        "needs_reauth": bool(result.get("needs_reauth")),
     }
     return backup

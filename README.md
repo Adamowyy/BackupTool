@@ -23,7 +23,8 @@ Windows may show an "unknown publisher" warning — click **More info** → **Ru
 - **App data** — optional one-switch backup of supported apps; they are detected
   automatically and the section shows whether they were found on this computer.
 - **Cloud** — destination can be **Dropbox** or **Google Drive**. Sign-in happens in the
-  browser; the token is kept on your machine only.
+  browser; the token is kept on your machine only. When the sign-in expires the row says
+  **Session expired**: one click renews it and the backup repeats by itself.
 - **Get it back** — a backup with a cloud destination has a **Download** button: it first
   checks the copy in the cloud and shows its size and date, then saves the archive wherever
   you point it. An existing file is never overwritten (`kopia (2).zip` instead). While it runs
@@ -51,8 +52,14 @@ Windows may show an "unknown publisher" warning — click **More info** → **Ru
   while the source app is running.
 - Cloud uploads always use a single ZIP file — uploading thousands of separate files
   hits API limits and is far slower.
+- An expired cloud session is detected *before* anything is packed, so a dead token costs a
+  second instead of minutes: the local copy stays untouched, the row shows **Session expired**
+  and its **Start** becomes **Renew session**. Renewing re-uses the stored client ID, and only
+  the browser approval is needed.
 - Google Drive needs your own OAuth client ID (free, one time). The app has a short
-  step-by-step guide behind **"How to get it?"**.
+  step-by-step guide behind **"How to get it?"**. Leaving that Google app in *Testing* is
+  fine: Google then expires the sign-in after 7 days, and **Renew session** fixes it with one
+  click (same client ID — no new key), after which the backup runs again automatically.
 - Credential files such as `auth.json`, `.env` or `connections.json` are never part of a
   backup.
 

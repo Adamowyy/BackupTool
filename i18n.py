@@ -173,10 +173,16 @@ PL = {
         "Zaloguj się na swoje konto Google i utwórz projekt (dowolna nazwa).",
     "APIs & Services → Library → search “Google Drive API” → Enable.":
         "APIs & Services → Library → wyszukaj „Google Drive API” → Enable.",
-    "OAuth consent screen: External, app name, your e-mail, then Publish app "
-    "(Testing mode expires tokens after 7 days).":
-        "OAuth consent screen: typ External, nazwa aplikacji, Twój e-mail, potem Publish "
-        "app (w trybie Testing token wygasa po 7 dniach).",
+    "Google Auth Platform → Audience: External, app name, your e-mail. You can "
+    "leave it in “Testing” — Google expires the sign-in every 7 days and the app "
+    "renews it with one click.":
+        "Google Auth Platform → Audience: typ External, nazwa aplikacji, Twój e-mail. "
+        "Możesz zostawić tryb „Testing” — Google kasuje wtedy logowanie co 7 dni, "
+        "a aplikacja odnawia je jednym kliknięciem.",
+    "Expired session? The badge turns into “Session expired” — click “Renew "
+    "session” and the backup runs again by itself.":
+        "Sesja wygasła? Plakietka zmienia się w „Sesja wygasła” — kliknij „Odnów "
+        "sesję”, a backup powtórzy się sam.",
     "Credentials → Create credentials → OAuth client ID → Desktop app.":
         "Credentials → Create credentials → OAuth client ID → typ Desktop app.",
     "Copy the Client ID and secret into the backup settings and click Connect.":
@@ -228,6 +234,32 @@ PL = {
         "Konto zostało odłączone — połącz je ponownie.",
     "Wrong client ID / secret (see the Google guide).":
         "Błędny client ID / secret (sprawdź instrukcję Google).",
+    "Reconnect": "Połącz ponownie",
+    "Renew session": "Odnów sesję",
+    "Session expired": "Sesja wygasła",
+    "Opening the browser — approve access and “{name}” will run again by itself…":
+        "Otwieram przeglądarkę — zatwierdź dostęp, a „{name}” ruszy ponownie sam.",
+    "Session renewed — repeating “{name}”…":
+        "Sesja odnowiona — powtarzam „{name}”…",
+    "Could not renew the session": "Nie udało się odnowić sesji",
+    "Session expired — click “Renew session” on “{name}”; the backup will repeat "
+    "by itself.":
+        "Sesja wygasła — kliknij „Odnów sesję” przy „{name}”, a kopia powtórzy się "
+        "sama.",
+    "sign-in expired": "sesja wygasła",
+    "The cloud sign-in expired — click “Reconnect”.":
+        "Sesja w chmurze wygasła — kliknij „Połącz ponownie”.",
+    "Wrong client ID / secret — connect again.":
+        "Błędny client ID / secret — połącz ponownie.",
+    "Google expires tokens after 7 days in “Testing”. Publish the app "
+    "(Google Auth Platform → Audience → Publish app) and it stops.":
+        "Google kasuje token po 7 dniach, dopóki aplikacja jest w trybie „Testing”. "
+        "Opublikuj ją (Google Auth Platform → Audience → Publish app), a przestanie.",
+    "Could not check the session — the cloud did not answer.":
+        "Nie udało się sprawdzić sesji — chmura nie odpowiedziała.",
+    "{provider} sign-in expired — click “Reconnect” (no new client ID needed).":
+        "Logowanie do {provider} wygasło — kliknij „Połącz ponownie” (nowy client ID "
+        "nie jest potrzebny).",
     "Cloud rejected the upload: {message}": "Chmura odrzuciła wysyłkę: {message}",
     "Cloud rejected the download: {message}": "Chmura odrzuciła pobieranie: {message}",
     "Cloud check failed: {message}": "Sprawdzenie chmury nie udało się: {message}",

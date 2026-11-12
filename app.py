@@ -127,6 +127,7 @@ class BackupApp:
         self._start_buttons = {}
         self._ready_this_session = set()
         self._running_id = None
+        self._renewing = set()
         self._batch_queue = []
         self._batch_total = 0
         self._batch_ok = 0
@@ -339,6 +340,17 @@ class BackupApp:
                 lambda bid=backup["id"]: self._toggle_download(bid),
                 width=96, height=34, corner_radius=9, font=F_BUTTON, **stop_style)
             btn_start.pack(side="right")
+        elif not running and (backup.get("last_run") or {}).get("needs_reauth"):
+            # Sesja chmury padła (Google: 7 dni w trybie Testing) — jedno
+            # kliknięcie odnawia ją i od razu powtarza ten backup.
+            btn_start = make_button(
+                actions, i18n.t("Renew session"),
+                lambda bid=backup["id"]: self._renew_session(bid),
+                width=118, height=34, fg_color=DANGER_SOFT,
+                hover_color=DANGER_SOFT_HOVER, text_color=ERR_TEXT,
+                border_width=1, border_color=DANGER,
+                corner_radius=9, font=F_BUTTON)
+            btn_start.pack(side="right")
         elif problem and not running:
             # Po przywróceniu listy na innym komputerze źródło może nie istnieć,
             # więc zamiast błędu po Start wiersz prowadzi do ustawień.
@@ -406,6 +418,8 @@ class BackupApp:
             return (i18n.t("Running…"), CARD_SEL, ACCENT)
         if backup["id"] == self._downloading:
             return (i18n.t("Downloading…"), CARD_SEL, INFO_TEXT)
+        if (backup.get("last_run") or {}).get("needs_reauth"):
+            return (i18n.t("Session expired"), STALE_BG, STALE_TEXT)
         if problem:
             return (i18n.t("Needs setup"), STALE_BG, STALE_TEXT)
         last = backup.get("last_run")
@@ -576,6 +590,10 @@ class BackupApp:
                     self._show_progress(*payload)
                 elif kind == "done":
                     self._finish(*payload)
+                elif kind == "renewed":
+                    self._renew_finished(*payload)
+                elif kind == "renew_failed":
+                    self._renew_failed(*payload)
                 elif kind == "download_ready":
                     self._download_ready(*payload)
                 elif kind == "download_missing":
@@ -669,6 +687,10 @@ class BackupApp:
                              + f"  →  {result.get('target', '')}", OK_TEXT)
         elif result.get("cancelled"):
             self._set_status(f"{i18n.t('Stopped')} — “{name}”.", WARN_TEXT)
+        elif result.get("needs_reauth"):
+            self._set_status(
+                i18n.t("Session expired — click “Renew session” on “{name}”; the "
+                       "backup will repeat by itself.", name=name), ERR_TEXT)
         else:
             self._set_status(f"{i18n.t('Error')} — “{name}”: {result.get('message', '')}",
                              ERR_TEXT)
@@ -684,6 +706,53 @@ class BackupApp:
                 self._set_status(i18n.t("Series stopped."), WARN_TEXT)
                 return
             self._batch_next()
+
+    # ---- odnawianie sesji chmury ----------------------------------------
+    def _renew_session(self, backup_id):
+        """Odnowienie sesji jedną zgodą w przeglądarce + powtórka backupu."""
+        if self._running_id or self._downloading:
+            self._set_status(i18n.t("Finish the current run first."), WARN_TEXT)
+            return
+        backup = core.get_backup(self.state, backup_id)
+        if not backup or core.cloud_provider(backup) == "none":
+            return
+        if backup_id in self._renewing:
+            return
+        self._renewing.add(backup_id)
+        name = backup.get("name", "")
+        self._set_status(
+            i18n.t("Opening the browser — approve access and “{name}” will run "
+                   "again by itself…", name=name), MUTED)
+        threading.Thread(target=self._renew_worker,
+                         args=(dict(backup), core.cloud_provider(backup)),
+                         daemon=True).start()
+
+    def _renew_worker(self, backup, provider):
+        try:
+            cloud.reconnect(provider)
+        except Exception as exc:  # noqa: BLE001 - komunikat do statusu
+            self._queue.put(("renew_failed", (backup["id"], str(exc))))
+            return
+        self._queue.put(("renewed", (backup["id"], backup.get("name", ""))))
+
+    def _renew_finished(self, backup_id, name):
+        self._renewing.discard(backup_id)
+        backup = core.get_backup(self.state, backup_id)
+        if backup:
+            last = dict(backup.get("last_run") or {})
+            last["needs_reauth"] = False
+            backup["last_run"] = last
+            core.save_state(self.state)
+        self._refresh_list()
+        self._set_status(i18n.t("Session renewed — repeating “{name}”…", name=name),
+                         OK_TEXT)
+        self.root.after(200, lambda: self._start_run(backup_id))
+
+    def _renew_failed(self, backup_id, message):
+        self._renewing.discard(backup_id)
+        self._refresh_list()
+        self._set_status(f"{i18n.t('Could not renew the session')}: {message}",
+                         ERR_TEXT)
 
     # ---- pobieranie kopii z chmury -------------------------------------
     def _download_from_cloud(self, backup_id):
@@ -1105,6 +1174,9 @@ class BackupDialog(ctk.CTkToplevel):
         self._last_pick = 0.0
         self._cloud_queue = queue.Queue()
         self._connecting = False
+        self._reconnecting = False
+        self._cloud_states = {}
+        self._checking_state = False
         if not self.backup.get("destination"):
             self.backup["destination"] = os.path.join(os.path.expanduser("~"), "BackupTool")
 
@@ -1378,6 +1450,14 @@ class BackupDialog(ctk.CTkToplevel):
                                             hover_color=DANGER_SOFT, text_color=ERR_TEXT,
                                             border_width=1, border_color=DANGER,
                                             corner_radius=8, font=F_MUTED)
+        # Widoczny tylko wtedy, gdy token przestał działać — logowanie od nowa
+        # tym samym client ID, bez wklejania klucza.
+        self.btn_cloud_reconnect = make_button(cloud_head, i18n.t("Reconnect"),
+                                               self._reconnect_cloud, width=132,
+                                               height=28, fg_color=ACCENT,
+                                               hover_color=ACCENT_HOVER,
+                                               text_color=ON_ACCENT, corner_radius=8,
+                                               font=F_SMALL)
 
         self.lbl_cloud_status = ctk.CTkLabel(self.cloud_box, text="", font=F_MUTED,
                                              text_color=MUTED, anchor="w",
@@ -1647,16 +1727,41 @@ class BackupDialog(ctk.CTkToplevel):
         connected = cloud.remote_ready(provider)
         if connected:
             account = cloud.remote_account(provider)
-            self.badge_cloud.configure(text=i18n.t("connected"), fg_color=OK_BG,
-                                       text_color=OK_TEXT)
-            self.lbl_cloud_status.configure(
-                text=i18n.t("Account: {account}", account=account) if account
-                else i18n.t("{provider} — account connected.", provider=label),
-                text_color=MUTED)
+            state = self._cloud_states.get(provider, "")
+            broken = state in ("expired", "client")
+            if broken:
+                self.badge_cloud.configure(text=i18n.t("sign-in expired"),
+                                           fg_color=DANGER_SOFT, text_color=ERR_TEXT)
+                self.lbl_cloud_status.configure(
+                    text=i18n.t("The cloud sign-in expired — click “Reconnect”.")
+                    if state == "expired" else
+                    i18n.t("Wrong client ID / secret — connect again."),
+                    text_color=ERR_TEXT)
+            else:
+                self.badge_cloud.configure(text=i18n.t("connected"), fg_color=OK_BG,
+                                           text_color=OK_TEXT)
+                self.lbl_cloud_status.configure(
+                    text=i18n.t("Account: {account}", account=account) if account
+                    else i18n.t("{provider} — account connected.", provider=label),
+                    text_color=MUTED)
             self.btn_cloud_connect.pack_forget()
             self.btn_cloud_forget.pack(side="right")
+            if broken:
+                if not self.btn_cloud_reconnect.winfo_manager():
+                    self.btn_cloud_reconnect.pack(side="right", padx=(0, 6))
+            else:
+                self.btn_cloud_reconnect.pack_forget()
             self.google_box.pack_forget()
-            self.lbl_cloud_info.configure(text="")
+            info = ""
+            if broken and provider == "gdrive":
+                info = i18n.t("Google expires tokens after 7 days in “Testing”. "
+                              "Publish the app (Google Auth Platform → Audience → "
+                              "Publish app) and it stops.")
+            elif state == "offline":
+                info = i18n.t("Could not check the session — the cloud did not answer.")
+            self.lbl_cloud_info.configure(text=info, text_color=SUBTLE)
+            if state == "" and not self._checking_state:
+                self._probe_cloud_state(provider)
         else:
             self.badge_cloud.configure(text=i18n.t("not connected"), fg_color=CARD_SEL,
                                        text_color=SUBTLE)
@@ -1706,8 +1811,52 @@ class BackupDialog(ctk.CTkToplevel):
 
         try:
             cloud.authorize(provider, client_id, secret, on_status=status)
+            self._cloud_states[provider] = "ok"
             self._cloud_queue.put(("done", ""))
         except Exception as exc:
+            self._cloud_queue.put(("error", str(exc)))
+
+    def _probe_cloud_state(self, provider):
+        """Pyta chmurę w tle, czy token jeszcze działa (bez blokowania okna)."""
+        if self._checking_state:
+            return
+        self._checking_state = True
+        threading.Thread(target=self._probe_worker, args=(provider,),
+                         daemon=True).start()
+
+    def _probe_worker(self, provider):
+        try:
+            state = cloud.token_state(provider)
+        except Exception:  # noqa: BLE001 - brak odpowiedzi to nie wysypka okna
+            state = "offline"
+        self._cloud_queue.put(("state", (provider, state)))
+
+    def _reconnect_cloud(self):
+        """Odświeżenie logowania tym samym client ID — bez wklejania klucza."""
+        provider = self._provider
+        if provider == "none" or self._connecting or self._reconnecting:
+            return
+        self._reconnecting = True
+        self._set_error("")
+        self.btn_cloud_reconnect.configure(state="disabled",
+                                           text=i18n.t("Connecting…"))
+        self.badge_cloud.configure(text=i18n.t("connecting…"), fg_color=CARD_SEL,
+                                   text_color=ACCENT)
+        self.lbl_cloud_status.configure(
+            text=i18n.t("Opening the browser — sign in and approve access…"),
+            text_color=ACCENT)
+        threading.Thread(target=self._reconnect_worker, args=(provider,),
+                         daemon=True).start()
+
+    def _reconnect_worker(self, provider):
+        def status(text):
+            self._cloud_queue.put(("status", text))
+
+        try:
+            cloud.reconnect(provider, on_status=status)
+            self._cloud_states[provider] = "ok"
+            self._cloud_queue.put(("done", ""))
+        except Exception as exc:  # noqa: BLE001 - komunikat do okna
             self._cloud_queue.put(("error", str(exc)))
 
     def _poll_cloud(self):
@@ -1716,10 +1865,19 @@ class BackupDialog(ctk.CTkToplevel):
                 kind, payload = self._cloud_queue.get_nowait()
                 if kind == "status":
                     self.lbl_cloud_status.configure(text=payload, text_color=ACCENT)
+                elif kind == "state":
+                    provider, value = payload
+                    self._cloud_states[provider] = value
+                    self._checking_state = False
+                    if provider == self._provider:
+                        self._sync_cloud()
                 elif kind in ("done", "error"):
                     self._connecting = False
+                    self._reconnecting = False
                     self.btn_cloud_connect.configure(state="normal",
                                                      text=i18n.t("Connect"))
+                    self.btn_cloud_reconnect.configure(state="normal",
+                                                       text=i18n.t("Reconnect"))
                     self._sync_cloud()
                     if kind == "error":
                         self._set_error(payload)
@@ -1742,6 +1900,7 @@ class BackupDialog(ctk.CTkToplevel):
                 parent=self):
             return
         cloud.forget(provider)
+        self._cloud_states.pop(provider, None)
         self._sync_cloud()
 
     def _show_google_help(self):
@@ -1897,8 +2056,11 @@ class GoogleHelpDialog(ctk.CTkToplevel):
         for step in (
             "Sign in to your Google account and create a project (any name).",
             "APIs & Services → Library → search “Google Drive API” → Enable.",
-            "OAuth consent screen: External, app name, your e-mail, then Publish app "
-            "(Testing mode expires tokens after 7 days).",
+            "Google Auth Platform → Audience: External, app name, your e-mail. "
+            "You can leave it in “Testing” — Google expires the sign-in every 7 "
+            "days and the app renews it with one click.",
+            "Expired session? The badge turns into “Session expired” — click "
+            "“Renew session” and the backup runs again by itself.",
             "Credentials → Create credentials → OAuth client ID → Desktop app.",
             "Copy the Client ID and secret into the backup settings and click Connect.",
             "Google will warn about an unverified app — it is your own app, so click "

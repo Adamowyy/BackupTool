@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import urllib.request
 
 import i18n
@@ -24,8 +25,17 @@ BACKENDS = {"dropbox": "dropbox", "gdrive": "drive"}
 PROVIDER_LABELS = {"dropbox": "Dropbox", "gdrive": "Google Drive"}
 RCLONE_MIN_SIZE = 5_000_000
 
+# Ile sekund wierzymy wynikowi sprawdzenia tokenu (żeby nie pytać chmury
+# przy każdym odświeżeniu ustawień).
+STATE_TTL = 300.0
+_STATE_CACHE: dict = {}
+_STATE_LOCK = threading.Lock()
+
 class CloudError(Exception):
     """Błąd integracji z chmurą — komunikat dla użytkownika."""
+
+class CloudAuthError(CloudError):
+    """Sesja chmury padła — da się ją odnowić jednym kliknięciem (bez nowego klucza)."""
 
 _ACTIVE_PIDS: set = set()
 _ACTIVE_LOCK = threading.Lock()
@@ -241,6 +251,7 @@ def authorize(provider: str, client_id: str = "", client_secret: str = "",
         parser.set(name, "client_id", client_id.strip())
         parser.set(name, "client_secret", client_secret.strip())
     _write_conf(parser)
+    forget_state(provider)
 
 def _extract_token(output: str) -> dict | None:
     start = output.find('{"access_token"')
@@ -264,23 +275,101 @@ def forget(provider: str) -> None:
     if name and parser.has_section(name):
         parser.remove_section(name)
         _write_conf(parser)
+    forget_state(provider)
 
 def test_remote(provider: str, timeout: int = 60) -> tuple:
-    """Sprawdza, czy token nadal działa (`rclone about`)."""
-    exe = rclone_exe()
+    """Sprawdza, czy token nadal działa. Zwraca (ok, komunikat)."""
+    state = token_state(provider, timeout=timeout, use_cache=False)
+    if state == "ok":
+        return True, "konto działa"
+    if state == "missing":
+        if not rclone_exe():
+            return False, "rclone nie jest zainstalowany"
+        return False, i18n.t("Account disconnected — connect it again.")
+    if state in ("expired", "client"):
+        return False, _auth_message(provider, state)
+    return False, i18n.t("The cloud did not answer in time.")
+
+def stored_client(provider: str) -> tuple:
+    """Client ID i secret z ostatniego łączenia — do odnowienia tokenu bez wklejania."""
+    parser = _read_conf()
     name = REMOTE_NAMES.get(provider, "")
-    if not exe or not name:
-        return False, "rclone nie jest zainstalowany"
+    if not name or not parser.has_section(name):
+        return "", ""
+    return (parser.get(name, "client_id", fallback="").strip(),
+            parser.get(name, "client_secret", fallback="").strip())
+
+def forget_state(provider: str = "") -> None:
+    """Zapomniany wynik sprawdzenia tokenu (po logowaniu, odnowieniu lub odłączeniu)."""
+    with _STATE_LOCK:
+        if provider:
+            _STATE_CACHE.pop(provider, None)
+        else:
+            _STATE_CACHE.clear()
+
+def token_state(provider: str, timeout: int = 30, use_cache: bool = True) -> str:
+    """Czy logowanie nadal działa: missing / ok / expired / client / offline.
+
+    Jedno `rclone about` (ok. 1–2 s). Wynik trzymamy chwilę w pamięci, żeby
+    otwarcie ustawień nie pytało chmury za każdym razem.
+    """
+    if provider not in REMOTE_NAMES or not remote_ready(provider):
+        return "missing"
+    now = time.monotonic()
+    if use_cache:
+        with _STATE_LOCK:
+            cached = _STATE_CACHE.get(provider)
+        if cached and now - cached[0] < STATE_TTL:
+            return cached[1]
+    exe = rclone_exe()
+    if not exe:
+        return "missing"
+    name = REMOTE_NAMES[provider]
     try:
         result = subprocess.run(
             [exe, "about", f"{name}:", "--json"], capture_output=True, text=True,
             timeout=timeout, encoding="utf-8", errors="replace",
             env=_env(), **_hidden_kwargs())
-    except (OSError, subprocess.SubprocessError) as exc:
-        return False, str(exc)
+    except subprocess.TimeoutExpired:
+        return "offline"
+    except (OSError, subprocess.SubprocessError):
+        return "missing"
+
     if result.returncode == 0:
-        return True, "konto działa"
-    return False, _first_error(result)
+        state = "ok"
+    else:
+        problem = _auth_problem(result.stderr or result.stdout or "")
+        state = problem or "offline"
+    if state != "offline":
+        with _STATE_LOCK:
+            _STATE_CACHE[provider] = (now, state)
+    return state
+
+def require_session(provider: str) -> str:
+    """Sprawdza sesję PRZED pakowaniem, żeby nie zjechać dysku i czasu na darmo.
+
+    Zwraca stan („ok"/„offline"/„missing"); gdy token padł, rzuca CloudAuthError,
+    który UI zamienia na przycisk „Odnów sesję" + automatyczne powtórzenie.
+    """
+    state = token_state(provider)
+    if state in ("expired", "client"):
+        raise CloudAuthError(_auth_message(provider, state))
+    return state
+
+def reconnect(provider: str, on_status=None, timeout: int = 300) -> None:
+    """Odświeża logowanie TYM SAMYM client ID — bez wklejania klucza od nowa.
+
+    Token Google'a wygasa (7 dni, dopóki aplikacja jest w trybie „Testing"),
+    ale client_id i secret zostają w rclone.conf. Wystarczy powtórzyć samo
+    logowanie w przeglądarce — generowanie nowego klucza nie jest potrzebne.
+    """
+    if provider not in BACKENDS:
+        raise CloudError(i18n.t("Unknown provider: {provider}", provider=provider))
+    client_id, secret = stored_client(provider)
+    if provider == "gdrive" and not client_id:
+        raise CloudError(i18n.t("Google Drive needs your own client ID (see README)."))
+    authorize(provider, client_id, secret, timeout=timeout, on_status=on_status)
+    forget_state(provider)
 
 def _env() -> dict:
     env = dict(os.environ)
@@ -305,15 +394,70 @@ def _percent_from_json(line: str):
         return int(min(100, (stats.get("transfers") or 0) * 100 / total_files))
     return None
 
+def _split_lines(text: str) -> list:
+    return [line.strip() for line in (text or "").splitlines() if line.strip()]
+
+# Rozpoznawanie problemów z logowaniem. rclone opakowuje `invalid_grant` w długi
+# tekst („couldn't find root directory ID: Get https://… couldn't fetch token:
+# invalid_grant…"), więc klasyfikujemy PO CAŁYM tekście, zanim go przytniemy —
+# inaczej przyczyna ląduje poza pierwszymi 300 znakami i komunikat kłamie.
+_AUTH_EXPIRED = ("invalid_grant", "token has been expired or revoked",
+                 "couldn't fetch token", "token expired")
+_AUTH_CLIENT = ("invalid_client", "unauthorized_client")
+
+def _auth_problem(text: str) -> str:
+    """„expired" (token do odnowienia), „client" (zły client_id) albo ""."""
+    lowered = (text or "").lower()
+    for marker in _AUTH_CLIENT:
+        if marker in lowered:
+            return "client"
+    for marker in _AUTH_EXPIRED:
+        if marker in lowered:
+            return "expired"
+    return ""
+
+def _auth_message(provider: str, problem: str) -> str:
+    if problem == "client":
+        return i18n.t("Wrong client ID / secret (see the Google guide).")
+    return i18n.t("{provider} sign-in expired — click “Reconnect” (no new client "
+                  "ID needed).", provider=PROVIDER_LABELS.get(provider, provider))
+
 def _error_from_lines(lines) -> str:
+    """Czytelny powód błędu z logu rclone.
+
+    Aplikacja woła rclone z `--use-json-log`, więc każda linia to JSON — bez
+    rozpakowania `msg` użytkownik dostawał surowy JSON, a przyczyna (np.
+    `invalid_grant`) lądowała poza pierwszymi 300 znakami.
+    """
     important = []
+    fallback = ""
     for line in lines:
+        payload = None
+        if line.startswith("{"):
+            try:
+                payload = json.loads(line)
+            except ValueError:
+                payload = None
+        if isinstance(payload, dict):
+            if payload.get("stats"):
+                continue
+            level = str(payload.get("level", "")).lower()
+            msg = str(payload.get("msg") or payload.get("message") or "").strip()
+            if not msg:
+                continue
+            if level in ("critical", "fatal", "error", "notice"):
+                important.append(msg)
+            else:
+                fallback = msg
+            continue
         for marker in ("Fatal error:", "CRITICAL:", "ERROR :", "NOTICE: Failed"):
             if marker in line:
                 important.append(line.split(marker, 1)[-1].strip())
                 break
     if important:
         return important[-1][:300]
+    if fallback:
+        return fallback[:300]
     return (lines[-1][:300] if lines else "nieznany błąd rclone")
 
 def _first_error(result) -> str:
@@ -364,12 +508,13 @@ def remote_file(provider: str, remote_dir: str, filename: str,
         raise CloudError(i18n.t("Could not start rclone: {error}", error=exc)) from exc
 
     if result.returncode != 0:
+        problem = _auth_problem(result.stderr or result.stdout or "")
+        if problem:
+            raise CloudAuthError(_auth_message(provider, problem))
         message = _first_error(result)
         lowered = message.lower()
         if "not found" in lowered or "doesn't exist" in lowered or "not exist" in lowered:
             return None
-        if "invalid_grant" in message or "invalid token" in lowered:
-            raise CloudError(i18n.t("Account disconnected — connect it again."))
         raise CloudError(i18n.t("Cloud check failed: {message}", message=message))
 
     try:
@@ -396,7 +541,7 @@ def download_file(local_file: str, provider: str, remote_dir: str, filename: str
         os.makedirs(folder, exist_ok=True)
     try:
         _run_rclone([exe, "copyto", ref, local_file, "--transfers", "1"], on_percent,
-                    should_stop, action="download")
+                    should_stop, action="download", provider=provider)
     except CloudError:
         _remove_partials(local_file)
         raise
@@ -417,7 +562,8 @@ def upload_file(local_file: str, provider: str, remote_dir: str,
     if on_status:
         on_status(f"Wysyłam {filename} do {PROVIDER_LABELS.get(provider, provider)}…")
     _run_rclone([exe, "copyto", local_file, target, "--transfers", "1",
-                 "--drive-chunk-size", "32M"], on_percent, should_stop)
+                 "--drive-chunk-size", "32M"], on_percent, should_stop,
+                provider=provider)
 
 def upload_dir(local_dir: str, provider: str, remote_dir: str,
                on_status=None, on_percent=None, should_stop=None) -> None:
@@ -432,13 +578,14 @@ def upload_dir(local_dir: str, provider: str, remote_dir: str,
     destination = f"{name}:{remote_dir}" if remote_dir else f"{name}:"
     _run_rclone([exe, "copy", local_dir, destination,
                  "--transfers", "8", "--checkers", "8", "--fast-list",
-                 "--no-update-dir-modtime"], on_percent, should_stop)
+                 "--no-update-dir-modtime"], on_percent, should_stop,
+                provider=provider)
 
 _PERCENT = re.compile(r"(\d{1,3})%")
 _STATS = ("--stats", "1s", "--log-level", "INFO", "--use-json-log")
 
 def _run_rclone(args: list, on_percent=None, should_stop=None,
-                action: str = "upload") -> None:
+                action: str = "upload", provider: str = "") -> None:
     command = list(args) + list(_STATS) + ["--config", conf_path()]
     try:
         process = subprocess.Popen(
@@ -485,11 +632,11 @@ def _run_rclone(args: list, on_percent=None, should_stop=None,
             _ACTIVE_PIDS.discard(process.pid)
 
     if code != 0:
+        raw = "\n".join(tail)
+        problem = _auth_problem(raw)
+        if problem:
+            raise CloudAuthError(_auth_message(provider, problem))
         message = _error_from_lines(tail)
-        if "invalid_grant" in message or "invalid token" in message.lower():
-            raise CloudError(i18n.t("Account disconnected — connect it again."))
-        if "invalid_client" in message:
-            raise CloudError(i18n.t("Wrong client ID / secret (see the Google guide)."))
         raise CloudError(i18n.t("Cloud rejected the upload: {message}", message=message)
                          if action == "upload"
                          else i18n.t("Cloud rejected the download: {message}",
