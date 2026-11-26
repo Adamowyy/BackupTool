@@ -19,9 +19,14 @@ Windows may show an "unknown publisher" warning — click **More info** → **Ru
   `.7z`…), it is copied unchanged instead of being packed twice.
 - **Remembers everything** — name, sources and destination are stored in
   `%APPDATA%\BackupTool\backups.json`, so the next run is one click.
-- **Run all** — refreshes every backup in the list, one after another.
+- **Run all, or just some** — tick the rows you want and press **Run selected**; the rest stay
+  untouched. Pressing **Start** on another row while one is already running puts it in the
+  queue instead of doing nothing, so a whole set can be refreshed in one go.
 - **App data** — optional one-switch backup of supported apps; they are detected
   automatically and the section shows whether they were found on this computer.
+- **Updates itself** — when a new release is out, an **Update** button appears in the
+  header. It downloads the new exe, swaps the file and starts the app again; nothing to
+  fetch by hand.
 - **Cloud** — destination can be **Dropbox** or **Google Drive**. Sign-in happens in the
   browser; the token is kept on your machine only. When the sign-in expires the row says
   **Session expired**: one click renews it and the backup repeats by itself.
@@ -39,7 +44,13 @@ Windows may show an "unknown publisher" warning — click **More info** → **Ru
 ## Notes
 
 - Folder mode overwrites existing files and adds new ones, but never deletes anything.
-- ZIP mode builds the archive from scratch, so it always matches the source.
+- ZIP mode always lists exactly the current files, but it no longer packs them from scratch:
+  after each run it stores a map (path, size, modification time) and the next run copies the
+  unchanged files out of the previous archive already compressed, packing only what changed.
+  Every rebuilt archive is CRC-checked before it replaces the old one; anything unexpected
+  (missing map, damaged archive, a file over 4 GB) falls back to a full rebuild.
+- A cloud destination keeps its last archive in `%LOCALAPPDATA%\BackupTool\staging`, because
+  that archive is the base for the next run. Budget roughly one archive per cloud backup.
 - Switching between Local, Dropbox and Google Drive keeps the cloud folder you set for
   each of them, so going back to a cloud restores the same path.
 - The list is a plain JSON file. In the cloud it is stored once, at

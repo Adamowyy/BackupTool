@@ -102,7 +102,7 @@ class HermesDetectionTests(unittest.TestCase):
         inventory = appdata_detect.hermes_inventory(self.root, include_user_dir=False)
         entries = core.collect_spec_entries(
             appdata_detect.hermes_specs(inventory, "mnemosyne"))
-        arcnames = {name.replace("\\", "/") for _src, name, _size in entries}
+        arcnames = {name.replace("\\", "/") for _src, name, _size, *_rest in entries}
         self.assertIn("Hermes/config.yaml", arcnames)
         self.assertIn("Hermes/projects.db", arcnames)
         self.assertIn("Hermes/skills/tool/SKILL.md", arcnames)
@@ -123,7 +123,7 @@ class HermesDetectionTests(unittest.TestCase):
         inventory = appdata_detect.hermes_inventory(self.root, include_user_dir=False)
         entries = core.collect_spec_entries(
             appdata_detect.hermes_specs(inventory, "builtin"))
-        arcnames = {name.replace("\\", "/") for _src, name, _size in entries}
+        arcnames = {name.replace("\\", "/") for _src, name, _size, *_rest in entries}
         self.assertIn("Hermes/memories/notatka.md", arcnames)
         self.assertIn("Hermes/memory_store.db", arcnames)
         self.assertIn("Hermes/config.yaml", arcnames)
@@ -138,7 +138,7 @@ class ObsidianTests(unittest.TestCase):
     def test_specs_skip_cache_and_trash(self):
         entries = core.collect_spec_entries(
             appdata_detect.obsidian_specs({"vaults": [self.vault]}))
-        arcnames = {name.replace("\\", "/") for _src, name, _size in entries}
+        arcnames = {name.replace("\\", "/") for _src, name, _size, *_rest in entries}
         self.assertIn("Obsidian/Moj Sejf/Notatki/pierwsza.md", arcnames)
         self.assertIn("Obsidian/Moj Sejf/.obsidian/app.json", arcnames)
         self.assertFalse(any("/cache/" in name or name.endswith("/cache") for name in arcnames))

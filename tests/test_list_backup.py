@@ -220,6 +220,7 @@ class RestoreUiTests(unittest.TestCase):
         instance.state = {"version": 1, "backups": list(backups or []),
                           "language": "en"}
         instance._ready_this_session = {"old-id"}
+        instance._batch_queue = []
         instance.status = mock.Mock()
         instance.last = None
         instance._refresh_list = mock.Mock()
@@ -295,6 +296,7 @@ class NeedsSetupUiTests(unittest.TestCase):
         instance = object.__new__(self.app_module.BackupApp)
         instance._running_id = None
         instance._downloading = None
+        instance._batch_queue = []
         instance._ready_this_session = set()
         instance.calls = []
         instance._set_status = lambda text, color=None: instance.calls.append(("status", text))

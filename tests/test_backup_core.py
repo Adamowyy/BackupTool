@@ -318,6 +318,7 @@ class BackupRunTests(unittest.TestCase):
         backup = core.new_backup("Kopia", [self.source], self.out, True)
         self.assertTrue(core.run_backup(backup)["ok"])
         original_size = os.path.getsize(os.path.join(self.out, "Kopia.zip"))
+        write(os.path.join(self.source, "duzy_0.txt"), "zmiana" * 1000)
 
         calls = {"n": 0}
 

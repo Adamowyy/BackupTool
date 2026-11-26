@@ -15,6 +15,7 @@ import backup_core as core
 import cloud
 import i18n
 import list_backup
+import updater
 
 if sys.stdout is None:
     sys.stdout = open(os.devnull, "w", encoding="utf-8")
@@ -101,6 +102,47 @@ def short_path(path, limit=78):
         tail = [parts[-1]]
     return head + "…\\" + "\\".join(tail)
 
+PROGRESS_INTERVAL = 0.2
+PROGRESS_PER_TICK = 24
+
+def progress_sender(backup_id, put, interval=PROGRESS_INTERVAL):
+    """Postęp do UI z limitem: 250 tys. plików inaczej zamraża okno na kwadranse."""
+    last = 0.0
+
+    def send(done, total, label):
+        nonlocal last
+        now = time.monotonic()
+        phase = total <= 0 or str(label).startswith("upload:")
+        if not phase and now - last < interval:
+            return
+        last = now
+        put(("progress", (backup_id, done, total, label)))
+
+    return send
+
+def _patch_ctk_clicks():
+    """CTk 6.0 woła command tylko po <Enter>; bez ruchu myszy kliknięcia giną."""
+    def on_release(button, event=None):
+        if button._state == "disabled" or button._command is None:
+            return
+        if event is not None and event.widget is not None:
+            try:
+                width = event.widget.winfo_width()
+                height = event.widget.winfo_height()
+                if width > 1 and height > 1 and not (0 <= event.x <= width
+                                                     and 0 <= event.y <= height):
+                    return
+            except tk.TclError:
+                return
+        button._on_leave()
+        button._click_animation_running = True
+        button.after(100, button._click_animation)
+        button._command()
+
+    ctk.CTkButton._on_release = lambda self, event=None: on_release(self, event)
+
+_patch_ctk_clicks()
+
 def make_button(parent, text, command, **kwargs):
     state = {"last": 0.0}
 
@@ -129,6 +171,7 @@ class BackupApp:
         self._running_id = None
         self._renewing = set()
         self._batch_queue = []
+        self._selected = set()
         self._batch_total = 0
         self._batch_ok = 0
         self._batch_errors = 0
@@ -137,15 +180,30 @@ class BackupApp:
         self._downloading = None
         self._download_cancel = threading.Event()
         self._list_working = False
+        self._update = None
+        self._update_busy = False
+        updater.write_start_marker()
 
         self._build_ui()
         self._refresh_list()
         self.root.after(80, self._poll_queue)
+        self.root.after(1500, self._check_updates)
+        self.root.after(300, self._report_failed_update)
+        self.root.after(600, self._purge_cache)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _report_failed_update(self):
+        """Poprzednia podmiana wróciła do starej wersji - powiedz o tym raz."""
+        failed = updater.update_failed_version()
+        if not failed:
+            return
+        updater.clear_update_failed()
+        self._set_status(i18n.t("The previous update did not start. "
+                                "Download it again from GitHub."), WARN_TEXT)
 
     def _build_ui(self):
         root = self.root
-        root.title(APP_NAME)
+        root.title(f"{APP_NAME} {updater.APP_VERSION}")
         root.geometry("1080x720")
         root.minsize(820, 560)
         root.configure(fg_color=BG)
@@ -189,6 +247,15 @@ class BackupApp:
             fg_color="transparent", hover_color=CARD_SEL, text_color=TEXT,
             border_width=1, border_color=BORDER, corner_radius=10, font=F_BUTTON)
         self.btn_menu.pack(side="right", padx=(0, 10))
+        self.btn_update = make_button(
+            actions, "", self._install_update, width=150, height=40,
+            fg_color=CARD_SEL, hover_color=ACCENT, text_color=TEXT,
+            border_width=1, border_color=BORDER, corner_radius=10,
+            font=F_BUTTON)
+        if not getattr(self, "_root_binds", False):
+            self._root_binds = True
+            self.root.bind("<Button-1>", self._on_root_click, add="+")
+            self.root.bind("<Escape>", lambda event: self._close_menu(), add="+")
 
         lang_box = ctk.CTkFrame(actions, fg_color="transparent")
         lang_box.pack(side="right", padx=(0, 10))
@@ -218,6 +285,10 @@ class BackupApp:
                                    border_width=1, border_color=ACCENT,
                                    corner_radius=8, font=F_SMALL)
         self.btn_all.pack(side="right")
+        self.btn_selected = make_button(
+            list_head, i18n.t("▶   Run selected"), self._run_selected,
+            width=196, height=30, fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            text_color=ON_ACCENT, corner_radius=8, font=F_SMALL)
 
         self.scroll = ctk.CTkScrollableFrame(
             main, fg_color=CARD, corner_radius=14,
@@ -253,6 +324,7 @@ class BackupApp:
         self.root.after(20, self._rebuild_ui)
 
     def _rebuild_ui(self):
+        self._close_menu()
         try:
             for widget in self.root.winfo_children():
                 widget.destroy()
@@ -262,6 +334,8 @@ class BackupApp:
         self._start_buttons = {}
         self._build_ui()
         self._refresh_list()
+        if self._update:
+            self._update_checked(self._update, True)
         if self._running_id:
             self._set_status(i18n.t("Copying…"), MUTED)
 
@@ -299,6 +373,9 @@ class BackupApp:
             text_color=ERR_TEXT if running else ACCENT,
             state="normal" if backups else "disabled")
 
+        self._selected &= {b["id"] for b in backups}
+        self._refresh_select_state()
+
         if not backups:
             self._build_empty_state()
             return
@@ -331,6 +408,7 @@ class BackupApp:
         actions.pack(side="right", padx=(16, 0))
         running = backup["id"] == self._running_id
         downloading = backup["id"] == self._downloading
+        queued = backup["id"] in self._batch_queue
         problem = core.setup_problem(backup)
         if downloading:
             stop_style = dict(fg_color=DANGER_SOFT, hover_color=DANGER_SOFT_HOVER,
@@ -339,6 +417,14 @@ class BackupApp:
                 actions, i18n.t("Stop"),
                 lambda bid=backup["id"]: self._toggle_download(bid),
                 width=96, height=34, corner_radius=9, font=F_BUTTON, **stop_style)
+            btn_start.pack(side="right")
+        elif queued and not running:
+            btn_start = make_button(
+                actions, i18n.t("Remove"),
+                lambda bid=backup["id"]: self._unqueue(bid),
+                width=96, height=34, fg_color="transparent", hover_color=CARD_SEL,
+                text_color=WARN_TEXT, border_width=1, border_color=BORDER,
+                corner_radius=9, font=F_BUTTON)
             btn_start.pack(side="right")
         elif not running and (backup.get("last_run") or {}).get("needs_reauth"):
             # Sesja chmury padła (Google: 7 dni w trybie Testing) — jedno
@@ -390,6 +476,15 @@ class BackupApp:
             if downloading:
                 btn_down.configure(state="disabled")
 
+        select = ctk.CTkCheckBox(
+            inner, text="", width=22, checkbox_width=18, checkbox_height=18,
+            border_color=BORDER, fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            checkmark_color=ON_ACCENT, corner_radius=5,
+            command=lambda bid=backup["id"]: self._toggle_select(bid))
+        select.pack(side="left", padx=(0, 12))
+        if backup["id"] in self._selected:
+            select.select()
+
         info = ctk.CTkFrame(inner, fg_color="transparent")
         info.pack(side="left", fill="x", expand=True)
 
@@ -418,6 +513,8 @@ class BackupApp:
             return (i18n.t("Running…"), CARD_SEL, ACCENT)
         if backup["id"] == self._downloading:
             return (i18n.t("Downloading…"), CARD_SEL, INFO_TEXT)
+        if backup["id"] in self._batch_queue:
+            return (i18n.t("Queued…"), CARD_SEL, INFO_TEXT)
         if (backup.get("last_run") or {}).get("needs_reauth"):
             return (i18n.t("Session expired"), STALE_BG, STALE_TEXT)
         if problem:
@@ -517,14 +614,85 @@ class BackupApp:
         self._batch_queue = []
         self._cancel_flag.set()
         self._set_status(i18n.t("Stopping…"), WARN_TEXT)
+        self._refresh_list()
+
+    def _toggle_select(self, backup_id):
+        if backup_id in self._selected:
+            self._selected.discard(backup_id)
+        else:
+            self._selected.add(backup_id)
+        self._refresh_select_state()
+
+    def _refresh_select_state(self):
+        backups = self.state.get("backups", [])
+        count = sum(1 for b in backups if b["id"] in self._selected)
+        if not count:
+            self.btn_selected.pack_forget()
+            return
+        self.btn_selected.configure(text=f"{i18n.t('▶   Run selected')}  ({count})")
+        if not self.btn_selected.winfo_manager():
+            self.btn_selected.pack(side="right", padx=(0, 8), before=self.btn_all)
+
+    def _selected_ids(self):
+        backups = self.state.get("backups", [])
+        return [b["id"] for b in backups if b["id"] in self._selected]
+
+    def _run_selected(self):
+        ids = self._selected_ids()
+        if not ids:
+            return
+        self._selected.clear()
+        if self._running_id or self._downloading:
+            added = sum(1 for bid in ids if self._enqueue(bid, quiet=True))
+            self._refresh_list()
+            if added:
+                self._set_status(i18n.t("Added {count} to the queue.", count=added), MUTED)
+            return
+        self._batch_queue = ids[1:]
+        self._batch_total = len(ids)
+        self._batch_ok = 0
+        self._batch_errors = 0
+        self._refresh_list()
+        self._start_run(ids[0], from_batch=True)
+
+    def _enqueue(self, backup_id, quiet=False):
+        """Dopisuje backup do kolejki trwającej serii (albo ją otwiera)."""
+        if backup_id == self._running_id or backup_id in self._batch_queue:
+            return False
+        backup = core.get_backup(self.state, backup_id)
+        if not backup:
+            return False
+        error = core.validate_backup(backup, self.state)
+        if error:
+            if not quiet:
+                self._set_status(f"{i18n.t('Skipped')} “{backup.get('name', '')}”: {error}",
+                                 WARN_TEXT)
+            return False
+        self._batch_queue.append(backup_id)
+        # Prąd + kolejka: licznik serii musi objąć też przebieg, który już leci.
+        self._batch_total = (self._batch_total or 1) + 1
+        self._refresh_list()
+        if not quiet:
+            self._set_status(i18n.t("Added to the queue — it starts after the current run."),
+                             MUTED)
+        return True
+
+    def _unqueue(self, backup_id):
+        if backup_id not in self._batch_queue:
+            return
+        self._batch_queue.remove(backup_id)
+        self._batch_total = max(1, self._batch_total - 1)
+        self._refresh_list()
+        self._set_status(i18n.t("Removed from the queue."), MUTED)
 
     def _batch_next(self):
         if not self._batch_queue:
-            if self._batch_total:
+            if self._batch_total > 1:
                 summary = f"{i18n.t('Series finished')} — {self._batch_ok} OK"
                 if self._batch_errors:
                     summary += ", " + plural(self._batch_errors, "error1", "errors", "errors5")
                 self._set_status(summary, OK_TEXT if not self._batch_errors else WARN_TEXT)
+            if self._batch_total:
                 self._batch_total = 0
                 self._refresh_list()
             return
@@ -533,6 +701,9 @@ class BackupApp:
 
     def _start_run(self, backup_id, from_batch=False):
         if self._running_id:
+            if not from_batch and backup_id != self._running_id:
+                # Start na innym wierszu w trakcie przebiegu = dopisz do kolejki.
+                self._enqueue(backup_id)
             return
         if self._downloading:
             # Jeden pasek postępu i jedno rclone naraz — dokończ pobieranie.
@@ -575,21 +746,33 @@ class BackupApp:
             self._set_status(i18n.t("Stopping the run…"), WARN_TEXT)
 
     def _run_worker(self, backup):
-        def progress(done, total, label):
-            self._queue.put(("progress", (backup["id"], done, total, label)))
-
-        result = core.run_backup(backup, progress=progress,
+        result = core.run_backup(backup,
+                                 progress=progress_sender(backup["id"], self._queue.put),
                                  cancelled=self._cancel_flag.is_set)
         self._queue.put(("done", (backup["id"], result)))
 
     def _poll_queue(self):
+        drained = 0
         try:
-            while True:
+            while drained < PROGRESS_PER_TICK:
                 kind, payload = self._queue.get_nowait()
+                drained += 1
                 if kind == "progress":
                     self._show_progress(*payload)
                 elif kind == "done":
                     self._finish(*payload)
+                elif kind == "update_found":
+                    self._update_checked(*payload)
+                elif kind == "update_ready":
+                    self._update_ready(*payload)
+                elif kind == "update_failed":
+                    self._update_failed()
+                elif kind == "cache_cleaned":
+                    self._cache_cleaned(*payload)
+                elif kind == "cache_cleared":
+                    self._cache_cleared(*payload)
+                elif kind == "about_cache":
+                    self._about_cache_size(*payload)
                 elif kind == "renewed":
                     self._renew_finished(*payload)
                 elif kind == "renew_failed":
@@ -616,7 +799,7 @@ class BackupApp:
                     self._list_failed(*payload)
         except queue.Empty:
             pass
-        self.root.after(80, self._poll_queue)
+        self.root.after(1 if drained >= PROGRESS_PER_TICK else 80, self._poll_queue)
 
     def _show_progress(self, backup_id, done, total, label):
         if not self.progress_row or not self.progress_row.winfo_manager():
@@ -625,7 +808,20 @@ class BackupApp:
             else:
                 return
 
-        if total <= 0:
+        if (label or "") == "scan":
+            if total > 0:
+                if str(self.progress_bar.cget("mode")) != "determinate":
+                    self.progress_bar.stop()
+                    self.progress_bar.configure(mode="determinate")
+                self.progress_bar.set(min(1.0, done / total))
+                text = f"{i18n.t('Scanning files…')}  {done} / ~{total}"
+            else:
+                if str(self.progress_bar.cget("mode")) != "indeterminate":
+                    self.progress_bar.configure(mode="indeterminate")
+                self.progress_bar.start()
+                text = f"{i18n.t('Scanning files…')}  {done}"
+            self.lbl_progress.configure(text=str(done))
+        elif total <= 0:
             if str(self.progress_bar.cget("mode")) != "indeterminate":
                 self.progress_bar.configure(mode="indeterminate")
             self.progress_bar.start()
@@ -679,7 +875,11 @@ class BackupApp:
         self._hide_progress()
         self._refresh_list()
 
-        if result.get("ok"):
+        if result.get("ok") and result.get("unchanged"):
+            self._set_status(f"{i18n.t('Nothing changed — the copy is up to date.')} — "
+                             f"“{name}”  ({str(result.get('seconds', 0)).replace('.', ',')} s)",
+                             OK_TEXT)
+        elif result.get("ok"):
             details = [plural(result.get("files", 0), "file", "files", "files5"),
                        core.human_size(result.get("bytes", 0)),
                        f"{str(result.get('seconds', 0)).replace('.', ',')} s"]
@@ -941,43 +1141,139 @@ class BackupApp:
 
     # ---- lista backupów: kopia i przywracanie --------------------------
     def _open_menu(self):
-        """Menu aplikacji: kopia listy i przywracanie listy (lokalnie / chmura)."""
-        menu = self._build_menu()
-        try:
-            x = self.btn_menu.winfo_rootx()
-            y = self.btn_menu.winfo_rooty() + self.btn_menu.winfo_height() + 4
-            menu.tk_popup(x, y)
-        finally:
-            menu.grab_release()
+        """Menu aplikacji: ramka w oknie, więc nie zależy od fokusu ani z-order Windows."""
+        if getattr(self, "_menu", None) is not None:
+            self._close_menu()
+            return
+        frame = ctk.CTkFrame(self.root, fg_color=CARD, corner_radius=10,
+                             border_width=1, border_color=BORDER)
+        for text, command, enabled in self._menu_items():
+            if command is None and enabled is None:
+                ctk.CTkLabel(frame, text=text, font=F_SMALL, text_color=MUTED,
+                             anchor="w").pack(fill="x", padx=14, pady=(10, 2))
+                continue
+            ctk.CTkButton(
+                frame, text=text, command=(lambda c=command: (self._close_menu(), c())),
+                anchor="w", height=30, corner_radius=6, fg_color="transparent",
+                hover_color=CARD_SEL, text_color=TEXT if enabled else MUTED,
+                font=F_SMALL, state="normal" if enabled else "disabled").pack(
+                    fill="x", padx=6, pady=1)
+        frame.update_idletasks()
+        width = max(frame.winfo_reqwidth(), 190)
+        height = frame.winfo_reqheight()
+        x = self.btn_menu.winfo_rootx() - self.root.winfo_rootx()
+        y = (self.btn_menu.winfo_rooty() - self.root.winfo_rooty()
+             + self.btn_menu.winfo_height() + 6)
+        x = max(6, min(x, max(6, self.root.winfo_width() - width - 6)))
+        y = max(6, min(y, max(6, self.root.winfo_height() - height - 6)))
+        frame.configure(width=width, height=height)
+        frame.pack_propagate(False)
+        frame.place(x=x, y=y)
+        frame.lift()
+        self._menu = frame
 
-    def _build_menu(self):
-        """Buduje menu od zera, bo lista chmur zmienia się po połączeniu konta."""
+    def _on_root_click(self, event):
+        """Kliknięcie obok menu je zamyka; klik w sam przycisk Menu tylko je przełącza."""
+        frame = getattr(self, "_menu", None)
+        if frame is None:
+            return
+        if self._over_menu_button(event.x_root, event.y_root):
+            return
+        widget = self.root.winfo_containing(event.x_root, event.y_root)
+        if widget is not None and str(widget).startswith(str(frame)):
+            return
+        self._close_menu()
+
+    def _over_menu_button(self, x_root, y_root) -> bool:
+        try:
+            left = self.btn_menu.winfo_rootx()
+            top = self.btn_menu.winfo_rooty()
+            return (left <= x_root <= left + self.btn_menu.winfo_width()
+                    and top <= y_root <= top + self.btn_menu.winfo_height())
+        except tk.TclError:
+            return False
+
+    def _close_menu(self):
+        """Ramka menu jest częścią okna, więc wystarczy ją zniszczyć."""
+        frame = getattr(self, "_menu", None)
+        self._menu = None
+        if frame is None:
+            return
+        try:
+            frame.destroy()
+        except tk.TclError:
+            pass
+
+    def _menu_items(self):
+        """Pozycje menu: (etykieta, komenda, aktywna); komenda None = nagłówek."""
         providers = [name for name in ("dropbox", "gdrive") if cloud.remote_ready(name)]
-        menu = self._make_menu(self.root)
-        save = self._make_menu(menu)
-        restore = self._make_menu(menu)
-        save.add_command(label=i18n.t("Local…"), command=self._save_list_local)
-        restore.add_command(label=i18n.t("Local…"), command=self._restore_list_local)
+        items = [(i18n.t("Backup list"), None, None),
+                 (i18n.t("Local…"), self._save_list_local, True)]
         for provider in providers:
             label = cloud.PROVIDER_LABELS.get(provider, provider)
-            save.add_command(label=label,
-                             command=lambda p=provider: self._save_list_cloud(p))
-            restore.add_command(label=label,
-                                command=lambda p=provider: self._restore_list_cloud(p))
+            items.append((label, lambda p=provider: self._save_list_cloud(p), True))
         if not providers:
-            for submenu in (save, restore):
-                submenu.add_command(label=i18n.t("Cloud — no account connected"),
-                                    state="disabled")
-        menu.add_cascade(label=i18n.t("Backup list"), menu=save)
-        menu.add_cascade(label=i18n.t("Restore list"), menu=restore)
-        return menu
+            items.append((i18n.t("Cloud — no account connected"), None, False))
+        items += [(i18n.t("Restore list"), None, None),
+                  (i18n.t("Local…"), self._restore_list_local, True)]
+        for provider in providers:
+            label = cloud.PROVIDER_LABELS.get(provider, provider)
+            items.append((label, lambda p=provider: self._restore_list_cloud(p), True))
+        if not providers:
+            items.append((i18n.t("Cloud — no account connected"), None, False))
+        items += [(i18n.t("Application"), None, None),
+                  (i18n.t("About"), self._open_about, True),
+                  (i18n.t("Check for updates"), self._check_updates_manual, True)]
+        return items
 
-    @staticmethod
-    def _make_menu(parent):
-        """Ciemne menu w stylu okna (tk.Menu, więc zachowuje się jak natywne)."""
-        return tk.Menu(parent, tearoff=0, bg=CARD, fg=TEXT, bd=0,
-                       activebackground=ACCENT, activeforeground=ON_ACCENT,
-                       activeborderwidth=0, relief="flat", font=F_SMALL)
+    def _open_about(self):
+        self._close_menu()
+        if getattr(self, "_about", None) is not None and self._about.winfo_exists():
+            self._about.lift()
+            return
+        self._about = AboutDialog(self.root, self)
+
+    def _about_cache_size(self, size):
+        dialog = getattr(self, "_about", None)
+        if dialog is not None and dialog.winfo_exists():
+            dialog.show_cache(size)
+
+    def _clear_all_cache(self):
+        def work():
+            removed, freed = core.purge_stale([], 0, include_active=True)
+            self._queue.put(("cache_cleared", (removed, freed)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _cache_cleared(self, removed, freed):
+        self._about_cache_size(0)
+        if removed:
+            self._set_status(i18n.t("Removed {count} unused files ({size}).",
+                                    count=removed, size=core.human_size(freed)), OK_TEXT)
+        else:
+            self._set_status(i18n.t("Nothing to clean up."), MUTED)
+
+    def _check_updates_manual(self):
+        self._check_updates(silent=False)
+
+    def _purge_cache(self, manual=False, quiet=False):
+        """Kasuje mapy i staging po backupach, których nie ma już na liście."""
+        keep = [item.get("id") for item in self.state.get("backups", [])]
+        days = 0 if manual else 7
+
+        def work():
+            removed, freed = core.purge_stale(keep, days)
+            if removed or (manual and not quiet):
+                self._queue.put(("cache_cleaned", (removed, freed)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _cache_cleaned(self, removed, freed):
+        if not removed:
+            self._set_status(i18n.t("Nothing to clean up."), MUTED)
+            return
+        self._set_status(i18n.t("Removed {count} unused files ({size}).",
+                                count=removed, size=core.human_size(freed)), OK_TEXT)
 
     def _list_ready(self):
         """Czy można ruszyć operację na liście, czyli nic nie trwa w tle."""
@@ -1131,6 +1427,73 @@ class BackupApp:
                                    missing=missing)
         self._set_status(text, OK_TEXT if not missing else WARN_TEXT)
 
+    # ---- aktualizacja programu -----------------------------------------
+    def _check_updates(self, silent=True):
+        """Pyta GitHuba o nowsze wydanie: raz po starcie albo z menu."""
+        if self._update_busy:
+            return
+        self._update_busy = True
+        if not silent:
+            self._set_status(i18n.t("Checking for updates…"))
+
+        def work():
+            self._queue.put(("update_found", (updater.available_update(), silent)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_checked(self, release, silent):
+        self._update_busy = False
+        if not release:
+            if not silent:
+                self._set_status(i18n.t("You have the newest version."))
+            return
+        self._update = release
+        version = release.get("version") or ""
+        self.btn_update.configure(text=i18n.t("Update to {version}", version=version),
+                                  state="normal")
+        self.btn_update.pack(side="right", padx=(0, 10))
+        self._set_status(i18n.t("Version {version} is available.", version=version))
+
+    def _install_update(self):
+        if not self._update or self._update_busy:
+            return
+        self._update_busy = True
+        release = self._update
+        self._close_menu()
+        self.btn_update.configure(state="disabled", text=i18n.t("Downloading…"))
+        self._set_status(i18n.t("Downloading the new version…"))
+
+        def work():
+            try:
+                path = updater.download_app_update(release)
+            except Exception:
+                self._queue.put(("update_failed", ()))
+                return
+            self._queue.put(("update_ready", (path, release.get("version"))))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_failed(self):
+        self._update_busy = False
+        self.btn_update.configure(state="normal", text=i18n.t("Try again"))
+        self._set_status(i18n.t("The update could not be downloaded."), ERR_TEXT)
+
+    def _update_ready(self, path, version):
+        try:
+            updater.launch_self_update(path, version)
+        except OSError:
+            self._update_failed()
+            return
+        self._set_status(i18n.t("Restarting with the new version…"))
+        self.root.after(400, self._restart_for_update)
+
+    def _restart_for_update(self):
+        self._cancel_flag.set()
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
+
     def _set_status(self, text, color=SUBTLE):
         self.status.configure(text=text, text_color=color)
 
@@ -1143,6 +1506,7 @@ class BackupApp:
                 APP_NAME, i18n.t("A download is in progress. Close the app?"),
                 parent=self.root):
             return
+        self._close_menu()
         self._cancel_flag.set()
         self._download_cancel.set()
         try:
@@ -2019,6 +2383,7 @@ class BackupDialog(ctk.CTkToplevel):
         core.remove_backup(self.app.state, self.backup["id"])
         core.save_state(self.app.state)
         self.app._refresh_list()
+        self.app._purge_cache(manual=True, quiet=True)
         self.app._set_status(f"{i18n.t('Delete backup')} — “{self.backup.get('name', '')}”")
         self._close()
 
@@ -2101,6 +2466,98 @@ class GoogleHelpDialog(ctk.CTkToplevel):
     def _open(self):
         if self.on_open:
             self.on_open(self.URL)
+
+class AboutDialog(ctk.CTkToplevel):
+    """Informacje o programie, autorze i miejscu zajmowanym przez cache."""
+
+    PORTFOLIO = "https://adamwarzecha.vercel.app"
+    GITHUB = "https://github.com/Adamowyy"
+
+    def __init__(self, parent, owner):
+        super().__init__(parent)
+        self.owner = owner
+        self.title(i18n.t("About"))
+        self.resizable(False, False)
+        self.configure(fg_color=BG)
+        self.transient(parent)
+        self.geometry(self._placed(parent, 560, 500))
+
+        head = ctk.CTkFrame(self, fg_color="transparent")
+        head.pack(fill="x", padx=22, pady=(18, 6))
+        ctk.CTkLabel(head, text=f"{APP_NAME} {updater.APP_VERSION}", font=F_PANEL,
+                     text_color=TEXT).pack(anchor="w")
+        ctk.CTkLabel(head, text=i18n.t("Backups of folders and files — one click."),
+                     font=F_MUTED, text_color=MUTED).pack(anchor="w", pady=(2, 0))
+
+        author = ctk.CTkFrame(self, fg_color=CARD, corner_radius=10)
+        author.pack(fill="x", padx=22, pady=(10, 0))
+        ctk.CTkLabel(author, text=i18n.t("Made by {name}", name="Adam Warzecha"),
+                     font=F_SMALL, text_color=TEXT,
+                     anchor="w").pack(fill="x", padx=14, pady=(12, 6))
+        links = ctk.CTkFrame(author, fg_color="transparent")
+        links.pack(fill="x", padx=14, pady=(0, 12))
+        for text, url in ((i18n.t("Portfolio"), self.PORTFOLIO),
+                          ("GitHub", self.GITHUB)):
+            make_button(links, text, lambda u=url: owner._open_url(u), width=120,
+                        height=32, fg_color="transparent", hover_color=CARD_SEL,
+                        text_color=TEXT, border_width=1, border_color=BORDER,
+                        corner_radius=8, font=F_SMALL).pack(side="left", padx=(0, 8))
+
+        cache = ctk.CTkFrame(self, fg_color=CARD, corner_radius=10)
+        cache.pack(fill="both", expand=True, padx=22, pady=(10, 0))
+        ctk.CTkLabel(cache, text=i18n.t("Cache"), font=F_SMALL, text_color=TEXT,
+                     anchor="w").pack(fill="x", padx=14, pady=(12, 0))
+        self.lbl_cache = ctk.CTkLabel(cache, text=i18n.t("Checking…"), font=F_MUTED,
+                                      text_color=MUTED, anchor="w")
+        self.lbl_cache.pack(fill="x", padx=14, pady=(2, 6))
+        ctk.CTkLabel(
+            cache,
+            text=i18n.t("Keeps the newest archive of every cloud backup on this "
+                        "computer, so the next runs pack only what changed. Clearing "
+                        "it means the next run packs and uploads everything again — "
+                        "the copies already in the cloud stay as they are."),
+            font=F_SMALL, text_color=MUTED, anchor="w",
+            justify="left", wraplength=470).pack(fill="x", padx=14)
+        make_button(cache, i18n.t("Clear cache"), self._clear, width=140, height=32,
+                    fg_color="transparent", hover_color=CARD_SEL, text_color=ERR_TEXT,
+                    border_width=1, border_color=BORDER, corner_radius=8,
+                    font=F_SMALL).pack(anchor="w", padx=14, pady=(10, 12))
+
+        footer = ctk.CTkFrame(self, fg_color="transparent")
+        footer.pack(fill="x", padx=22, pady=(12, 16))
+        make_button(footer, i18n.t("Close"), self.destroy, width=90, height=36,
+                    fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=ON_ACCENT,
+                    corner_radius=9, font=F_SMALL).pack(side="right")
+
+        self.grab_set()
+        self.after(120, lambda: enable_dark_titlebar(self))
+        self.after(160, self._front)
+        self._load_cache()
+
+    def _load_cache(self):
+        def work():
+            self.owner._queue.put(("about_cache", (core.cache_usage(),)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def show_cache(self, size):
+        self.lbl_cache.configure(text=i18n.t("Takes {size} now.", size=core.human_size(size)))
+
+    def _clear(self):
+        self.owner._clear_all_cache()
+
+    def _placed(self, parent, width, height):
+        parent.update_idletasks()
+        x = parent.winfo_rootx() + max(0, (parent.winfo_width() - width) // 2)
+        y = parent.winfo_rooty() + max(0, (parent.winfo_height() - height) // 2)
+        return f"{width}x{height}+{x}+{y}"
+
+    def _front(self):
+        try:
+            self.lift()
+            self.focus_force()
+        except Exception:
+            pass
 
 def _install_excepthook():
     log_path = os.path.join(os.path.dirname(core.default_state_path()) or ".",

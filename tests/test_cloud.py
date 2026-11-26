@@ -127,7 +127,14 @@ class CloudRunTests(unittest.TestCase):
         self.assertTrue(result["ok"], result["message"])
         self.assertEqual(result["target"], "Dropbox  →  Kopia.zip")
         self.assertEqual(len(self.uploaded), 1)
-        self.assertFalse(os.path.exists(core.staging_path(backup)))
+        self._assert_archive_kept(backup)
+
+    def _assert_archive_kept(self, backup):
+        """Gotowe archiwum zostaje w staging jako baza przebiegu przyrostowego."""
+        folder = core.staging_path(backup)
+        self.assertTrue(os.path.isfile(os.path.join(folder, "Kopia.zip")))
+        self.assertEqual([n for n in os.listdir(folder)
+                          if n.endswith(core.TMP_SUFFIX)], [])
 
     def test_cloud_ignores_folder_mode_and_always_zips(self):
         backup = core.new_backup("Kopia", [self.source], "", False,
@@ -147,9 +154,28 @@ class CloudRunTests(unittest.TestCase):
         self.assertTrue(seen["is_file"])
         self.assertTrue(seen["name"].endswith(".zip"))
         self.assertEqual(result["target"], "Google Drive  →  Kopia.zip")
-        self.assertFalse(os.path.exists(core.staging_path(backup)))
+        self._assert_archive_kept(backup)
 
-    def test_upload_error_is_reported_and_staging_cleaned(self):
+    def test_unchanged_archive_is_not_sent_again(self):
+        backup = self._backup()
+        uploads = []
+
+        def fake_upload(backup_arg, local_target, on_status=None, on_percent=None,
+                        should_stop=None):
+            uploads.append(local_target)
+            return False
+
+        with mock.patch.object(cloud, "remote_ready", return_value=True), \
+                mock.patch.object(cloud, "prepare_upload", side_effect=fake_upload):
+            first = core.run_backup(backup)
+            second = core.run_backup(backup)
+
+        self.assertTrue(first["ok"], first["message"])
+        self.assertTrue(second["ok"], second["message"])
+        self.assertTrue(second.get("unchanged"))
+        self.assertEqual(len(uploads), 1, "bez zmian nie ma czego wysyłać")
+
+    def test_upload_error_keeps_the_archive_for_the_next_run(self):
         backup = self._backup()
 
         def failing(backup_arg, local_target, on_status=None, on_percent=None, should_stop=None):
@@ -161,7 +187,7 @@ class CloudRunTests(unittest.TestCase):
 
         self.assertFalse(result["ok"])
         self.assertIn("odłączone", result["message"])
-        self.assertFalse(os.path.exists(core.staging_path(backup)))
+        self._assert_archive_kept(backup)
 
     def test_local_folder_mode_still_copies_folder(self):
         backup = core.new_backup("Kopia", [self.source], self.tmp, False)
@@ -682,6 +708,7 @@ class RenewUiHelperTests(unittest.TestCase):
         instance = object.__new__(self.helpers)
         instance._running_id = None
         instance._downloading = None
+        instance._batch_queue = []
         instance._ready_this_session = set()
         return instance
 

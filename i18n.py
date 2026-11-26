@@ -10,6 +10,46 @@ PL = {
     "+  New backup": "+  Nowy backup",
     "Your backups": "Twoje backupy",
     "▶   Run all": "▶   Uruchom wszystkie",
+    "▶   Run selected": "▶   Uruchom wybrane",
+    "Queued…": "W kolejce…",
+    "Remove": "Usuń",
+    "Removed from the queue.": "Usunięto z kolejki.",
+    "The previous archive is damaged.": "Poprzednie archiwum jest uszkodzone.",
+    "Nothing changed — the copy is up to date.": "Bez zmian — kopia jest aktualna.",
+    "Application": "Program",
+    "Check for updates": "Sprawdź aktualizacje",
+    "Checking for updates…": "Sprawdzam aktualizacje…",
+    "You have the newest version.": "Masz najnowszą wersję.",
+    "Version {version} is available.": "Dostępna jest wersja {version}.",
+    "Update to {version}": "Aktualizuj do {version}",
+    "Downloading the new version…": "Pobieram nową wersję…",
+    "Restarting with the new version…": "Restartuję z nową wersją…",
+    "The update could not be downloaded.": "Nie udało się pobrać aktualizacji.",
+    "Try again": "Spróbuj ponownie",
+    "The previous update did not start. Download it again from GitHub.":
+        "Poprzednia aktualizacja nie wystartowała. Pobierz ją ponownie z GitHuba.",
+    "Clean up unused files": "Wyczyść nieużywane pliki",
+    "About": "Informacje",
+    "Made by {name}": "Autor: {name}",
+    "Portfolio": "Portfolio",
+    "Cache": "Cache",
+    "Checking…": "Sprawdzam…",
+    "Takes {size} now.": "Zajmuje teraz {size}.",
+    "Keeps the newest archive of every cloud backup on this computer, so the next "
+    "runs pack only what changed. Clearing it means the next run packs and uploads "
+    "everything again — the copies already in the cloud stay as they are.":
+        "Trzyma najnowsze archiwum każdej kopii w chmurze na tym komputerze, dzięki "
+        "czemu kolejne przebiegi pakują tylko zmiany. Wyczyszczenie oznacza, że "
+        "następny przebieg zapakuje i wyśle wszystko od nowa — kopie w chmurze "
+        "zostają nietknięte.",
+    "Clear cache": "Wyczyść cache",
+    "Nothing to clean up.": "Nie ma czego czyścić.",
+    "Removed {count} unused files ({size}).":
+        "Usunięto nieużywane pliki: {count} ({size}).",
+    "File too large for the fast path.": "Plik za duży na przebieg przyrostowy.",
+    "Added to the queue — it starts after the current run.":
+        "Dodano do kolejki — startuje po bieżącym przebiegu.",
+    "Added {count} to the queue.": "Dodano do kolejki: {count}.",
     "■   Stop": "■   Przerwij",
     "Save all": "Zapisz wszystko",
     "settings": "ustawienia",
