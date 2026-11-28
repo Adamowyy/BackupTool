@@ -19,7 +19,7 @@ import tempfile
 import urllib.request
 
 APP_NAME = "BackupTool"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 APP_EXE_NAME = "BackupTool.exe"
 RELEASES_API = "https://api.github.com/repos/Adamowyy/BackupTool/releases/latest"
 USER_AGENT = f"{APP_NAME}/{APP_VERSION}"

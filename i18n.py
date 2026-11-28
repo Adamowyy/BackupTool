@@ -16,6 +16,7 @@ PL = {
     "Removed from the queue.": "Usunięto z kolejki.",
     "The previous archive is damaged.": "Poprzednie archiwum jest uszkodzone.",
     "Nothing changed — the copy is up to date.": "Bez zmian — kopia jest aktualna.",
+    "Changed files…": "Zmienione pliki…",
     "Application": "Program",
     "Check for updates": "Sprawdź aktualizacje",
     "Checking for updates…": "Sprawdzam aktualizacje…",

@@ -80,6 +80,18 @@ class IncrementalTests(unittest.TestCase):
             self.assertEqual(archive.read("src/a.txt").decode(), "AAA v2" * 400)
             self.assertEqual(archive.read("src/nowy.txt").decode(), "NOWY")
 
+    def test_progress_counts_only_changed_files(self):
+        self._run()
+        write(os.path.join(self.source, "a.txt"), "AAA v2" * 400)
+        write(os.path.join(self.source, "sub", "b.txt"), "BBB v2" * 400)
+        seen = []
+
+        core.run_backup(self.backup, progress=lambda done, total, label: seen.append((done, total, label)))
+
+        packed = [item for item in seen if item[2] == "changed"]
+        self.assertEqual([(d, t) for d, t, _l in packed], [(1, 2), (2, 2)],
+                         "pasek liczy tylko zmienione pliki, nie całe archiwum")
+
     def test_reused_entry_keeps_its_timestamp_and_compressed_bytes(self):
         target = self._run()
         with zipfile.ZipFile(target) as archive:

@@ -873,14 +873,22 @@ def _incremental_zip(target: str, entries, backup: dict, progress=None,
         with open(target, "rb") as source, open(tmp, "wb") as handle:
             writer = _ZipWriter(handle)
             new_map = {}
-            for position, (path, arcname, size, mtime_ns) in enumerate(entries, 1):
+
+            def cached(info, entry, size, mtime_ns):
+                return (info is not None and entry is not None
+                        and int(entry[0]) == size and int(entry[1]) == mtime_ns
+                        and info.file_size == size)
+
+            plan = []
+            for _path, arcname, size, mtime_ns in entries:
+                name = arcname.replace(os.sep, "/")
+                plan.append(cached(index.get(name), manifest.get(name), size, mtime_ns))
+            total_changed = plan.count(False)
+            changed_done = 0
+            for (path, arcname, size, mtime_ns), unchanged in zip(entries, plan):
                 _check_cancel(cancelled)
                 name = arcname.replace(os.sep, "/")
                 info = index.get(name)
-                cached = manifest.get(name)
-                unchanged = (info is not None and cached is not None
-                             and int(cached[0]) == size and int(cached[1]) == mtime_ns
-                             and info.file_size == size)
                 if unchanged:
                     payload = _raw_member(source, info)
                     stamp = (info.date_time + (0, 0, 0))[:6]
@@ -896,9 +904,10 @@ def _incremental_zip(target: str, entries, backup: dict, progress=None,
                         stamp = time.localtime(stat.st_mtime)
                         crc, payload, original = _compress_file(readable, method)
                     writer.add(name, stamp, crc, len(payload), original, method, payload)
+                    changed_done += 1
+                    if progress and total_changed:
+                        progress(changed_done, total_changed, "changed")
                 new_map[name] = [size, mtime_ns]
-                if progress:
-                    progress(position, len(entries), arcname)
             writer.close()
         if writer.count != len(entries) or not _archive_is_sane(tmp, len(entries)):
             _silent_remove(tmp)
@@ -1027,7 +1036,7 @@ def run_backup(backup: dict, progress=None, cancelled=None, detection=None) -> d
             progress=(lambda found: progress(found, expected, "scan")) if progress else None)
         result["bytes"] = sum(item[2] for item in entries)
         if progress:
-            progress(0, len(entries), "")
+            progress(0, 0 if use_zip else len(entries), "")
         needs_upload = True
         if use_zip:
             result["files"], needs_upload = _sync_archive(backup, target, entries,

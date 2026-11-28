@@ -821,6 +821,13 @@ class BackupApp:
                 self.progress_bar.start()
                 text = f"{i18n.t('Scanning files…')}  {done}"
             self.lbl_progress.configure(text=str(done))
+        elif (label or "") == "changed":
+            if str(self.progress_bar.cget("mode")) != "determinate":
+                self.progress_bar.stop()
+                self.progress_bar.configure(mode="determinate")
+            self.progress_bar.set(min(1.0, done / total) if total else 0)
+            self.lbl_progress.configure(text=f"{done} / {total}")
+            text = f"{i18n.t('Changed files…')}  {done} / {total}"
         elif total <= 0:
             if str(self.progress_bar.cget("mode")) != "indeterminate":
                 self.progress_bar.configure(mode="indeterminate")
